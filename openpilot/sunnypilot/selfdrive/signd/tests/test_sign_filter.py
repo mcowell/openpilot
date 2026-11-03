@@ -32,9 +32,10 @@ def run(f, seq, v_ego=25., yaw_rate=0.):
 class TestSignFilter(OpenpilotTestCase):
   def test_accepts_after_min_hits(self):
     f = SignFilter()
-    seq = approaching(80, 3)
-    assert run(f, seq[:2]).speed_limit == 0
-    assert run(f, seq[2:]).speed_limit == 80
+    n = f.params.min_hits
+    seq = approaching(80, n)
+    assert run(f, seq[:n - 1]).speed_limit == 0
+    assert run(f, seq[n - 1:]).speed_limit == 80
 
   def test_low_confidence_ignored(self):
     f = SignFilter()
@@ -48,12 +49,24 @@ class TestSignFilter(OpenpilotTestCase):
 
   def test_hits_must_be_within_window(self):
     f = SignFilter(FilterParams(window=1.0))
-    seq = [(i * 0.9, dets) for i, (_, dets) in enumerate(approaching(50, 3))]  # hits 0.9 s apart, never 3 within 1 s
+    seq = [(i * 1.1, dets) for i, (_, dets) in enumerate(approaching(50, 3))]  # hits 1.1 s apart, never 2 within 1 s
     assert run(f, seq).speed_limit == 0
 
   def test_receding_sign_rejected(self):
     f = SignFilter()
     assert run(f, approaching(100, 5, start_size=0.1, growth=0.8)).speed_limit == 0
+
+  def test_end_of_zone_clears_limit(self):
+    f = SignFilter()
+    run(f, approaching(40, 3))
+    # "40 AREA ENDS" sign: the classifier reports end of zone as value 0
+    state = run(f, approaching(0, 3, start_t=30.))
+    assert state.speed_limit == 0
+
+  def test_single_end_misread_keeps_limit(self):
+    f = SignFilter()
+    run(f, approaching(40, 3))
+    assert run(f, [(30., [Detection(0, 0.9, (0.7, 0.4, 0.05, 0.06))])]).speed_limit == 40
 
   def test_new_sign_replaces_old(self):
     f = SignFilter()

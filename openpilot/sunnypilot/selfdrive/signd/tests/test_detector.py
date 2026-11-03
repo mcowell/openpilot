@@ -9,11 +9,12 @@ from pathlib import Path
 import numpy as np
 
 from openpilot.common.test import OpenpilotTestCase
-from openpilot.sunnypilot.selfdrive.signd.detector import DET_SIZE, SignDetector, decode_boxes, letterbox, nv12_to_rgb, resize, roi_pixels
+from openpilot.sunnypilot.selfdrive.signd.detector import CLS_H, CLS_W, DET_SIZE, SignDetector, classifier_crop, decode_boxes, letterbox, nv12_to_rgb, resize, roi_pixels
 from openpilot.sunnypilot.selfdrive.signd.tools.sign_eval import score
 
 # constant-output models from tests/fake_models.py: one sign reading 60, at the same spot every frame
 FAKE_MODELS = Path(__file__).parent / 'data' / 'fake_models'
+FAKE_MODELS_END = Path(__file__).parent / 'data' / 'fake_models_end'  # classifier says end of zone
 
 
 def rgb_to_nv12(rgb: np.ndarray, stride: int) -> tuple[np.ndarray, int]:
@@ -47,6 +48,23 @@ class TestSignDetector(OpenpilotTestCase):
     x, y, bw, bh = dets[0].box
     assert rx0 <= x * w and (x + bw) * w <= rx1
     assert ry0 <= y * h and (y + bh) * h <= ry1
+
+  def test_end_of_zone_reported_as_zero(self):
+    dets = SignDetector('road', FAKE_MODELS_END).detect(np.zeros((1208, 1928, 3), dtype=np.uint8))
+    assert [x.value for x in dets] == [0]
+
+  def test_classifier_crop_includes_tabs(self):
+    img = np.zeros((400, 400, 3), dtype=np.uint8)
+    img[100:200, 100:180] = 255  # 80x100 panel
+    img[210:300, 100:180] = 50  # tab plates below it
+    crop = classifier_crop(img, (100, 100, 180, 200))
+    assert crop.shape == (CLS_H, CLS_W, 3)
+    # panel spans the middle half horizontally; tabs fill the lower part of the crop
+    assert crop[CLS_H // 4, CLS_W // 2].min() > 200
+    assert abs(int(crop[int(CLS_H * 0.75), CLS_W // 2, 0]) - 50) < 10
+    # off the image edge is padded grey, not stretched
+    edge = classifier_crop(img, (0, 0, 80, 100))
+    assert edge.shape == (CLS_H, CLS_W, 3) and edge[0, 0, 0] == 114
 
   def test_detect_roi_matches_detect(self):
     det = SignDetector('road', FAKE_MODELS)

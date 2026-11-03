@@ -6,7 +6,7 @@ Adds a third speed limit source, `vision`, next to `car` (CAN) and `map` (OSM). 
 road camera ──VisionIPC──> signd ──liveVisionSpeedLimitSP──> plannerd (SpeedLimitResolver) ──> longitudinalPlanSP ──> UI / SLA
                                   │
                    detector.py ─> sign_filter.py
-          (sign detector + value classifier)   (needs several agreeing frames; holds the value until the next sign, a turn, 5 km or 10 min)
+          (sign detector + value classifier)   (needs several agreeing frames; holds the value until the next sign, an end-of-zone sign, a turn, 5 km or 10 min)
 ```
 
 - **Setting:** `SpeedLimitVision` (Settings → Cruise → Speed Limit → Source).
@@ -17,13 +17,15 @@ road camera ──VisionIPC──> signd ──liveVisionSpeedLimitSP──> pla
 - **Units:** sign values are read in the units set by `IsMetric` (km/h signs in Canada, mph in the US).
 - **When signd runs:** onroad, with the setting on, and only when `models/sign_detector.onnx` and `models/sign_classifier.onnx` exist.
 - **Scope (v1):** regulatory maximum-speed signs on the right side of the road. Advisory signs, "ahead" signs, school zones, minimum limits and truck limits must be classified as *reject*.
+- **End of zone:** signs with an "ENDS / FIN" tab are classified as *end*. Once confirmed, signd drops the held limit and reports none, so the resolver falls back to the other sources.
+- **Rate:** 2 Hz (`SIGND_RATE_HZ`). On the 3X the detector takes ~72 ms and the classifier ~9 ms per sign when compiled for the GPU.
 
 ## Model contract
 
 | model | input | output |
 |---|---|---|
 | `sign_detector.onnx` | `image` f32 `[1,3,640,640]`, RGB 0..1, letterboxed ROI (`detector.ROIS`) | `boxes` f32 `[N,6]` after NMS: `x1,y1,x2,y2` (input px), `score`, `class` (0 = speed limit sign) |
-| `sign_classifier.onnx` | `crop` f32 `[B,3,64,64]`, RGB 0..1 | `logits` f32 `[B, 26]`: `SPEED_LIMIT_VALUES` (10..130 step 5), then reject |
+| `sign_classifier.onnx` | `crop` f32 `[1,3,96,64]`, RGB 0..1: `classifier_crop()`, the panel plus the tabs below it | `logits` f32 `[1, 27]`: `SPEED_LIMIT_VALUES` (10..130 step 5), reject, end of zone |
 
 - **Runtimes:** onnxruntime runs the models when it is installed (PC/Mac). Otherwise tinygrad's `OnnxRunner` runs them, as on the device.
 - **Licensing:** keep the training code and weights MIT/Apache compatible.

@@ -94,7 +94,7 @@ _services: dict[str, tuple] = {
   "carControlSP": (True, 100., 10),
   "carStateSP": (True, 100., 10),
   "liveMapDataSP": (True, 1., 1),
-  "liveVisionSpeedLimitSP": (True, 5., 5),
+  "liveVisionSpeedLimitSP": (True, 2., 2),
   "modelDataV2SP": (True, 20., 10, QueueSize.BIG),
   "liveLocationKalman": (True, 20.),
 

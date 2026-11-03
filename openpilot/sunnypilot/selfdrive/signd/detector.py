@@ -13,9 +13,10 @@ Model contract (both ONNX, single input each, see README.md):
                       or raw YOLO-style predictions float32 [1, 4 + C, A]: cx, cy, w, h, then C class scores
                       (decoded and NMS'd here, since NMS ops don't run on tinygrad)
                       class 0 = speed limit sign, anything else is ignored
-  classifier: input   float32 [1, 3, CLS_SIZE, CLS_SIZE] (or a dynamic batch dim), RGB in 0..1: the detected box plus a margin of 1/3 its width
-              output  float32 [1, len(SPEED_LIMIT_VALUES) + 1] logits, last index = reject
-                      (advisory, end of zone, school zone, minimum, truck, unreadable...)
+  classifier: input   float32 [1, 3, CLS_H, CLS_W], RGB in 0..1: see classifier_crop(), the sign panel plus the
+                      area below it where tabs (AREA, BEGINS, ENDS) hang
+              output  float32 [1, len(SPEED_LIMIT_VALUES) + 2] logits: the values, then reject
+                      (advisory, school zone, minimum, truck, unreadable...), then end of zone ("ENDS / FIN" tab)
 """
 import os
 from pathlib import Path
@@ -27,7 +28,10 @@ from openpilot.sunnypilot.selfdrive.signd.sign_filter import Detection
 
 MODELS_DIR = Path(os.getenv('SIGND_MODELS_DIR', Path(__file__).parent / 'models'))
 DET_SIZE = 640  # default, the detector's input size is read from the model
-CLS_SIZE = 64
+CLS_W, CLS_H = 64, 96
+# classifier crop around the detected panel box, in panel widths/heights: room for the tabs below
+CLS_MARGIN_X, CLS_MARGIN_TOP, CLS_MARGIN_BOTTOM = 0.5, 0.2, 1.2
+REJECT, END = len(SPEED_LIMIT_VALUES), len(SPEED_LIMIT_VALUES) + 1
 SIGN_CLASS = 0
 NMS_IOU = 0.5
 
@@ -45,6 +49,19 @@ def roi_pixels(camera: str, w: int, h: int) -> tuple[int, int, int, int]:
   x0, y0, x1, y1 = ROIS[camera]
   # even aligned so the ROI maps onto whole NV12 chroma samples
   return int(x0 * w) & ~1, int(y0 * h) & ~1, int(x1 * w) & ~1, int(y1 * h) & ~1
+
+
+def classifier_crop(img: np.ndarray, box) -> np.ndarray:
+  """CLS_H x CLS_W crop for the classifier from a panel box (x0, y0, x1, y1 in img pixels); parts outside img are grey"""
+  x0, y0, x1, y1 = box
+  bw, bh = x1 - x0, y1 - y0
+  cx0, cx1 = int(round(x0 - CLS_MARGIN_X * bw)), int(round(x1 + CLS_MARGIN_X * bw))
+  cy0, cy1 = int(round(y0 - CLS_MARGIN_TOP * bh)), int(round(y1 + CLS_MARGIN_BOTTOM * bh))
+  ih, iw = img.shape[:2]
+  out = np.full((cy1 - cy0, cx1 - cx0, 3), 114, dtype=np.uint8)
+  sx0, sy0, sx1, sy1 = max(0, cx0), max(0, cy0), min(iw, cx1), min(ih, cy1)
+  out[sy0 - cy0:sy1 - cy0, sx0 - cx0:sx1 - cx0] = img[sy0:sy1, sx0:sx1]
+  return resize(out, CLS_W, CLS_H)
 
 
 def softmax(x: np.ndarray) -> np.ndarray:
@@ -183,18 +200,16 @@ class SignDetector:
     if len(xyxy) == 0:
       return []
 
-    crops = []
-    for x0, y0, x1, y1 in xyxy:
-      m = max(6, (x1 - x0) // 3)  # same context margin the classifier was trained with
-      crops.append(to_nchw(resize(roi[max(0, y0 - m):min(rh, y1 + m), max(0, x0 - m):min(rw, x1 + m)], CLS_SIZE, CLS_SIZE)))
+    crops = [to_nchw(classifier_crop(roi, b)) for b in xyxy]
     # one crop per call: tinygrad's OnnxRunner fixes dynamic dims on first use
     probs = softmax(np.concatenate([self.classifier(c) for c in crops]))
 
     detections = []
     for (x0, y0, x1, y1), score, p in zip(xyxy, scores, probs, strict=True):
       idx = int(p.argmax())
-      if idx >= len(SPEED_LIMIT_VALUES):  # reject class
+      if idx == REJECT:
         continue
       box = (float((rx0 + x0) / w), float((ry0 + y0) / h), float((x1 - x0) / w), float((y1 - y0) / h))
-      detections.append(Detection(SPEED_LIMIT_VALUES[idx], float(score * p[idx]), box))
+      # an end-of-zone sign is reported as value 0: once confirmed, the filter drops the held limit
+      detections.append(Detection(SPEED_LIMIT_VALUES[idx] if idx < REJECT else 0, float(score * p[idx]), box))
     return detections
