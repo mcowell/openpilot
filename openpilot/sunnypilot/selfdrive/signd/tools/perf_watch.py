@@ -28,7 +28,7 @@ def main():
   rows: list[dict] = []
   signd_frames: list[float] = []
   start = last_print = time.monotonic()
-  print('   t  signd  Hz  exec_ms  limit | modeld drop%  exec_ms | cpu% (max core)  gpu%  temp  thermal | source')
+  print('   t  signd  Hz  exec_ms  limit | modeld drop%  exec_ms | cpu% (max core)  gpu% | temp C: gpu  cpu  max  fan% thermal | source')
   while time.monotonic() - start < args.seconds:
     sm.update(100)
     now = time.monotonic()
@@ -52,13 +52,17 @@ def main():
       'cpu_max': max(cpu) if cpu else 0,
       'gpu': dev.gpuUsagePercent,
       'temp': dev.maxTempC,
+      'gpu_temp': max(dev.gpuTempC, default=0.),
+      'cpu_temp': max(dev.cpuTempC, default=0.),
+      'fan': dev.fanSpeedPercentDesired,
     }
     rows.append(row)
     limit = f'{vision.speedLimitSign:3d}' if signd_on and vision.speedLimitValid else '  -'
     print(' '.join([
       f"{now - start:4.0f}  {'on ' if signd_on else 'off'}  {row['signd_hz']:3.1f}  {row['signd_ms']:6.1f}   {limit}  |",
       f"      {row['drop']:5.1f}  {row['model_ms']:7.1f} |",
-      f"{row['cpu']:4.0f} ({row['cpu_max']:3d})      {row['gpu']:3d}  {row['temp']:4.0f}  {str(dev.thermalStatus):7s} |",
+      f"{row['cpu']:4.0f} ({row['cpu_max']:3d})      {row['gpu']:3d} |",
+      f"        {row['gpu_temp']:4.0f} {row['cpu_temp']:4.0f} {row['temp']:4.0f}  {row['fan']:3d}  {str(dev.thermalStatus):7s} |",
       str(sm['longitudinalPlanSP'].speedLimit.resolver.source),
     ]), flush=True)
 
@@ -76,7 +80,8 @@ def summarize(rows: list[dict]) -> None:
 
     parts = [f"\nsignd {'on ' if state else 'off'} ({len(sel)} s):",
              f"modeld drop {max(r['drop'] for r in sel):.1f}% max, exec {med('model_ms'):.1f} ms;",
-             f"cpu {med('cpu'):.0f}%, gpu {med('gpu'):.0f}%, temp {max(r['temp'] for r in sel):.0f} C max"]
+             f"cpu {med('cpu'):.0f}%, gpu {med('gpu'):.0f}%;",
+             f"gpu temp {sel[0]['gpu_temp']:.0f} -> {sel[-1]['gpu_temp']:.0f} C, max temp {max(r['temp'] for r in sel):.0f} C, fan {med('fan'):.0f}%"]
     if state:
       parts.append(f"; signd {med('signd_hz'):.1f} Hz, {med('signd_ms'):.0f} ms median, {max(r['signd_ms'] for r in sel):.0f} ms max")
     print(' '.join(parts))
