@@ -159,21 +159,57 @@ class OnnxModel:
 
   def __call__(self, x: np.ndarray) -> np.ndarray:
     """Returns the first output"""
-    return self._run(x)
+    return np.asarray(self._run(x))
+
+
+class CompiledModel:
+  """Runs a model compiled by SConscript (tinygrad_repo/examples/openpilot/compile_onnx.py), as modeld does on device."""
+  def __init__(self, path: Path):
+    from tinygrad.tensor import Tensor
+    from openpilot.selfdrive.modeld.helpers import load_oob
+
+    self.path = path
+    jits = load_oob(path)
+    self.model_run = jits['run']
+    (self.input_name, (shape, dtype, device)), = jits['input_specs'].items()
+    self.input_shape = list(shape)
+    self.input_np = np.zeros(shape, dtype=dtype)
+    self.input_host = Tensor(self.input_np, device='NPY')._buffer()
+    self.inputs = {self.input_name: Tensor(self.input_np, device=device).realize()}
+    self.outputs = {name: Tensor(np.zeros(shape, dtype=dtype), device=device).realize()
+                    for name, (shape, dtype, device) in jits['output_specs'].items()}
+    self.output_name = next(iter(self.outputs))
+
+  def __call__(self, x: np.ndarray) -> np.ndarray:
+    """Returns the first output"""
+    self.input_np[...] = x
+    self.inputs[self.input_name]._buffer().copy_from(self.input_host)
+    self.model_run(output_buffers=self.outputs, **self.inputs)
+    return self.outputs[self.output_name].numpy().astype(np.float32)
+
+
+def load_model(models_dir: Path, name: str) -> 'CompiledModel | OnnxModel':
+  """The compiled model when the build made one, else the ONNX model (PC/Mac tools and tests)"""
+  pkl = models_dir / f'{name}_tinygrad.pkl'
+  return CompiledModel(pkl) if pkl.exists() else OnnxModel(models_dir / f'{name}.onnx')
 
 
 class SignDetector:
   def __init__(self, camera: str = 'road', models_dir: Path = MODELS_DIR, min_score: float = 0.3):
     self.camera = camera
     self.min_score = min_score
-    self.detector = OnnxModel(models_dir / 'sign_detector.onnx')
-    self.classifier = OnnxModel(models_dir / 'sign_classifier.onnx')
+    self.detector = load_model(models_dir, 'sign_detector')
+    self.classifier = load_model(models_dir, 'sign_classifier')
     size = self.detector.input_shape[-1]
     self.det_size = size if isinstance(size, int) else DET_SIZE
 
   @staticmethod
-  def available(models_dir: Path = MODELS_DIR) -> bool:
-    return (models_dir / 'sign_detector.onnx').exists() and (models_dir / 'sign_classifier.onnx').exists()
+  def available(models_dir: Path = MODELS_DIR, compiled: bool | None = None) -> bool:
+    """compiled: require the build's compiled models (default on device, where uncompiled ONNX is far too slow)"""
+    if compiled is None:
+      compiled = os.path.isfile('/AGNOS')
+    ext = '_tinygrad.pkl' if compiled else '.onnx'
+    return all((models_dir / f'{name}{ext}').exists() for name in ('sign_detector', 'sign_classifier'))
 
   def detect(self, rgb: np.ndarray) -> list[Detection]:
     """rgb: full camera frame, HxWx3 uint8"""

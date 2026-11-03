@@ -1,0 +1,37 @@
+import ctypes.util
+import glob
+import os
+from SCons.Script import Action, Value
+
+Import('env', 'arch')
+
+# Compile signd's ONNX models into tinygrad pickles at build time, the same way modeld does.
+# Uncompiled, the detector takes ~3 s per frame on a comma 3X; compiled, ~70 ms.
+if os.getenv('SKIP_TINYGRAD_COMPILE'):
+  Return()
+if arch not in ('comma_arm64', 'Darwin') and ctypes.util.find_library('LLVM') is None:
+  print("\033[93msignd: LLVM not found, skipping tinygrad model compilation.\033[0m")
+  Return()
+
+lenv = env.Clone()
+lenv.PrependENVPath('PYTHONPATH', Dir('#tinygrad_repo').abspath)
+
+tinygrad_root = env.Dir("#").abspath
+tinygrad_files = ["#"+x for x in glob.glob(env.Dir("#tinygrad_repo").relpath + "/**", recursive=True, root_dir=tinygrad_root)
+                  if 'pycache' not in x and os.path.isfile(os.path.join(tinygrad_root, x))]
+
+if arch == 'comma_arm64':
+  tg_flags = 'DEV=QCOM IMAGE=1 FLOAT16=1 NOLOCALS=1 JIT_BATCH_SIZE=0 OPENPILOT_HACKS=1'
+else:
+  tg_flags = 'DEV=METAL JIT=2' if arch == 'Darwin' else 'DEV=CPU:LLVM'
+mac_brew_string = f'HOME={os.path.expanduser("~")}' if arch == 'Darwin' else ''
+compiler = Dir('#tinygrad_repo/examples/openpilot').abspath
+
+for name in ('sign_detector', 'sign_classifier'):
+  onnx = File(f'models/{name}.onnx')
+  if not os.path.isfile(onnx.abspath):
+    continue  # models are optional; signd doesn't run without them
+  pkl = File(f'models/{name}_tinygrad.pkl').abspath
+  cmd = (f'{tg_flags} {mac_brew_string} python3 "{compiler}/compile_onnx.py" '
+         f'"{onnx.abspath}" "{pkl}" --out-of-band --benchmark-runs 1')
+  lenv.Command(pkl, tinygrad_files + [onnx, Value(cmd)], Action(cmd, "  [ONNX] $TARGET"))

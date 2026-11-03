@@ -17,7 +17,7 @@ from openpilot.cereal.visionipc import VisionStreamType
 from msgq.visionipc import VisionIpcClient
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
-from openpilot.common.realtime import config_realtime_process
+from openpilot.common.realtime import set_core_affinity
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.selfdrive.signd import SIGND_RATE_HZ
@@ -43,7 +43,8 @@ def get_vision_speed_limit_packet(state: SignFilterState, is_metric: bool, frame
 
 
 def main():
-  config_realtime_process(7, 5)
+  # not realtime: keep off modeld/dmonitoringmodeld's core and don't preempt anything, a sign read can wait
+  set_core_affinity([0, 1, 2, 3])
   params = Params()
 
   if not SignDetector.available():

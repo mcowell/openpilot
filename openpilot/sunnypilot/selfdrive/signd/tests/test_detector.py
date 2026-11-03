@@ -9,7 +9,8 @@ from pathlib import Path
 import numpy as np
 
 from openpilot.common.test import OpenpilotTestCase
-from openpilot.sunnypilot.selfdrive.signd.detector import CLS_H, CLS_W, DET_SIZE, SignDetector, classifier_crop, decode_boxes, letterbox, nv12_to_rgb, resize, roi_pixels
+from openpilot.sunnypilot.selfdrive.signd.detector import (CLS_H, CLS_W, DET_SIZE, SignDetector, classifier_crop, decode_boxes, letterbox,
+                                                           nv12_to_rgb, resize, roi_pixels)
 from openpilot.sunnypilot.selfdrive.signd.tools.sign_eval import score
 
 # constant-output models from tests/fake_models.py: one sign reading 60, at the same spot every frame
@@ -48,6 +49,15 @@ class TestSignDetector(OpenpilotTestCase):
     x, y, bw, bh = dets[0].box
     assert rx0 <= x * w and (x + bw) * w <= rx1
     assert ry0 <= y * h and (y + bh) * h <= ry1
+
+  def test_available_requires_compiled_models_on_device(self):
+    # the fake models are ONNX only: fine for PC tools and tests, not for the device
+    assert SignDetector.available(FAKE_MODELS, compiled=False)
+    assert not SignDetector.available(FAKE_MODELS, compiled=True)
+
+  def test_onnx_fallback_without_compiled_models(self):
+    det = SignDetector('road', FAKE_MODELS)
+    assert type(det.detector).__name__ == 'OnnxModel' and type(det.classifier).__name__ == 'OnnxModel'
 
   def test_end_of_zone_reported_as_zero(self):
     dets = SignDetector('road', FAKE_MODELS_END).detect(np.zeros((1208, 1928, 3), dtype=np.uint8))
