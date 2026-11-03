@@ -10,7 +10,7 @@ import numpy as np
 
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.sunnypilot.selfdrive.signd.detector import (CLS_H, CLS_W, DET_SIZE, SignDetector, classifier_crop, decode_boxes, letterbox,
-                                                           nv12_to_rgb, resize, roi_pixels)
+                                                           nv12_to_rgb, nv12_to_rgb_half, resize, roi_pixels)
 from openpilot.sunnypilot.selfdrive.signd.tools.sign_eval import score
 
 # constant-output models from tests/fake_models.py: one sign reading 60, at the same spot every frame
@@ -76,12 +76,22 @@ class TestSignDetector(OpenpilotTestCase):
     edge = classifier_crop(img, (0, 0, 80, 100))
     assert edge.shape == (CLS_H, CLS_W, 3) and edge[0, 0, 0] == 114
 
-  def test_detect_roi_matches_detect(self):
+  def test_detect_nv12_matches_detect(self):
+    # VisionIPC buffers have rows padded to a stride wider than the frame
     det = SignDetector('road', FAKE_MODELS)
     w, h = 1928, 1208
-    frame = np.zeros((h, w, 3), dtype=np.uint8)
-    x0, y0, x1, y1 = roi_pixels('road', w, h)
-    assert det.detect(frame) == det.detect_roi(frame[y0:y1, x0:x1], w, h)
+    frame = np.random.default_rng(0).integers(0, 255, (h, w, 3), dtype=np.uint8)
+    data, uv_offset = rgb_to_nv12(frame, 2048)
+    assert det.detect(frame) == det.detect_nv12(data, 2048, uv_offset, w, h)
+
+  def test_nv12_to_rgb_half(self):
+    rgb = np.random.default_rng(1).integers(0, 255, (48, 64, 3)).astype(np.uint8)
+    rgb = np.repeat(np.repeat(rgb[::2, ::2], 2, axis=0), 2, axis=1)  # constant 2x2 blocks: no chroma subsampling loss
+    data, uv_offset = rgb_to_nv12(rgb, 80)
+    out = nv12_to_rgb_half(data, 80, uv_offset, (8, 4, 40, 28))
+    expected = rgb[4:28:2, 8:40:2].astype(int)
+    assert out.shape == expected.shape
+    assert np.abs(out.astype(int) - expected).max() <= 3
 
   def test_roi_pixels_even(self):
     for camera in ('wide', 'road'):
@@ -124,10 +134,17 @@ class TestSignDetector(OpenpilotTestCase):
     assert boxes.shape == (1, 6)
 
   def test_letterbox_keeps_aspect(self):
-    img, scale, pad_x, pad_y = letterbox(np.zeros((300, 600, 3), dtype=np.uint8), DET_SIZE)
+    img, scale, pad_x, pad_y = letterbox(np.zeros((600, 1200, 3), dtype=np.uint8), DET_SIZE, DET_SIZE)
     assert img.shape == (DET_SIZE, DET_SIZE, 3)
-    assert scale == DET_SIZE / 600
+    assert scale == DET_SIZE / 1200
     assert pad_x == 0 and pad_y == (DET_SIZE - 320) // 2
+
+  def test_letterbox_pads_without_upscaling(self):
+    src = np.full((332, 531, 3), 7, dtype=np.uint8)
+    img, scale, pad_x, pad_y = letterbox(src, 544, 352)
+    assert img.shape == (352, 544, 3) and scale == 1.
+    assert (pad_x, pad_y) == (6, 10)
+    assert (img[pad_y:pad_y + 332, pad_x:pad_x + 531] == 7).all() and img[0, 0, 0] == 114
 
 
 class TestScore(OpenpilotTestCase):

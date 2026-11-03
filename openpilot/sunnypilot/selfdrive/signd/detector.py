@@ -8,7 +8,8 @@ Two-stage speed limit sign detector: a sign detector on a region of interest of 
 then a value classifier on each detected sign crop.
 
 Model contract (both ONNX, single input each, see README.md):
-  detector:   input   float32 [1, 3, S, S], RGB in 0..1, letterboxed ROI (S read from the model, e.g. 640)
+  detector:   input   float32 [1, 3, H, W], RGB in 0..1: the ROI at half resolution, padded (H, W read from the model; sized
+                      to the half-res ROI, e.g. 352x544 for the 3X road camera, it needs no resize)
               output  either post-NMS boxes float32 [N, 6]: x1, y1, x2, y2 (input pixels), score, class
                       or raw YOLO-style predictions float32 [1, 4 + C, A]: cx, cy, w, h, then C class scores
                       (decoded and NMS'd here, since NMS ops don't run on tinygrad)
@@ -70,17 +71,17 @@ def softmax(x: np.ndarray) -> np.ndarray:
 
 
 def resize(img: np.ndarray, w: int, h: int) -> np.ndarray:
-  """Bilinear resize in numpy (opencv isn't available on device)"""
+  """Bilinear resize in numpy (opencv isn't available on device), separable: rows first, then columns"""
   ih, iw = img.shape[:2]
   ys = np.clip((np.arange(h) + 0.5) * ih / h - 0.5, 0, ih - 1)
   xs = np.clip((np.arange(w) + 0.5) * iw / w - 0.5, 0, iw - 1)
-  y0, x0 = ys.astype(int), xs.astype(int)
+  y0, x0 = ys.astype(np.intp), xs.astype(np.intp)
   y1, x1 = np.minimum(y0 + 1, ih - 1), np.minimum(x0 + 1, iw - 1)
-  fy, fx = (ys - y0)[:, None, None], (xs - x0)[None, :, None]
-  img = img.astype(np.float32)
-  top = img[y0][:, x0] * (1 - fx) + img[y0][:, x1] * fx
-  bottom = img[y1][:, x0] * (1 - fx) + img[y1][:, x1] * fx
-  return (top * (1 - fy) + bottom * fy).astype(np.uint8)
+  fy, fx = (ys - y0).astype(np.float32)[:, None, None], (xs - x0).astype(np.float32)[None, :, None]
+  top, bottom = img[y0].astype(np.float32), img[y1].astype(np.float32)
+  rows = top + (bottom - top) * fy
+  left, right = rows[:, x0], rows[:, x1]
+  return (left + (right - left) * fx).astype(np.uint8)
 
 
 def nv12_to_rgb(data: np.ndarray, stride: int, uv_offset: int, roi: tuple[int, int, int, int]) -> np.ndarray:
@@ -94,14 +95,41 @@ def nv12_to_rgb(data: np.ndarray, stride: int, uv_offset: int, roi: tuple[int, i
   return np.clip(rgb, 0, 255).astype(np.uint8)
 
 
-def letterbox(img: np.ndarray, size: int) -> tuple[np.ndarray, float, int, int]:
-  """Resize keeping aspect ratio and pad to size x size. Returns image, scale and padding."""
-  h, w = img.shape[:2]
-  scale = size / max(h, w)
-  nh, nw = round(h * scale), round(w * scale)
-  out = np.full((size, size, 3), 114, dtype=np.uint8)
-  pad_y, pad_x = (size - nh) // 2, (size - nw) // 2
-  out[pad_y:pad_y + nh, pad_x:pad_x + nw] = resize(img, nw, nh)
+def nv12_to_rgb_half(data: np.ndarray, stride: int, uv_offset: int, roi: tuple[int, int, int, int]) -> np.ndarray:
+  """Half-resolution RGB of the roi: luma averaged 2x2 onto the chroma grid, so only a quarter of the pixels are converted.
+  Doubles as an area downscale, which keeps small signs better than skipping pixels."""
+  x0, y0, x1, y1 = roi
+  h2, w2 = (y1 - y0) // 2, (x1 - x0) // 2
+  yp = data[:uv_offset].reshape(-1, stride)[y0:y1, x0:x1]
+  y = (yp[0::2, 0::2].astype(np.uint16) + yp[0::2, 1::2] + yp[1::2, 0::2] + yp[1::2, 1::2]) * np.float32(0.25)
+  uv = data[uv_offset:].reshape(-1, stride)[y0 // 2:y1 // 2, x0:x1].reshape(h2, w2, 2).astype(np.float32) - 128.
+  u, v = uv[..., 0], uv[..., 1]
+  rgb = np.stack([y + 1.402 * v, y - 0.344136 * u - 0.714136 * v, y + 1.772 * u], axis=-1)
+  return np.clip(rgb, 0, 255).astype(np.uint8)
+
+
+def rgb_to_nv12(rgb: np.ndarray) -> tuple[np.ndarray, int, int]:
+  """Inverse of nv12_to_rgb (BT.601 full range), for running RGB images through the device code path.
+  Returns data, stride, uv_offset."""
+  f = rgb.astype(np.float32)
+  h, w = f.shape[:2]
+  y = 0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2]
+  sub = f.reshape(h // 2, 2, w // 2, 2, 3).mean(axis=(1, 3))
+  ys = y.reshape(h // 2, 2, w // 2, 2).mean(axis=(1, 3))
+  uv = np.stack([(sub[..., 2] - ys) / 1.772 + 128., (sub[..., 0] - ys) / 1.402 + 128.], axis=-1).reshape(h // 2, w)
+  data = np.concatenate([np.clip(np.round(y), 0, 255).astype(np.uint8).ravel(), np.clip(np.round(uv), 0, 255).astype(np.uint8).ravel()])
+  return data, w, w * h
+
+
+def letterbox(img: np.ndarray, w: int, h: int) -> tuple[np.ndarray, float, int, int]:
+  """Fit img into w x h keeping aspect ratio (never upscaling), padded with grey. Returns image, scale and padding.
+  When the model input is sized to the image, this is only a pad: no resize on the CPU."""
+  ih, iw = img.shape[:2]
+  scale = min(1., w / iw, h / ih)
+  nh, nw = round(ih * scale), round(iw * scale)
+  out = np.full((h, w, 3), 114, dtype=np.uint8)
+  pad_y, pad_x = (h - nh) // 2, (w - nw) // 2
+  out[pad_y:pad_y + nh, pad_x:pad_x + nw] = img if scale == 1. else resize(img, nw, nh)
   return out, scale, pad_x, pad_y
 
 
@@ -200,8 +228,8 @@ class SignDetector:
     self.min_score = min_score
     self.detector = load_model(models_dir, 'sign_detector')
     self.classifier = load_model(models_dir, 'sign_classifier')
-    size = self.detector.input_shape[-1]
-    self.det_size = size if isinstance(size, int) else DET_SIZE
+    dh, dw = self.detector.input_shape[-2:]
+    self.det_h, self.det_w = (dh, dw) if isinstance(dh, int) and isinstance(dw, int) else (DET_SIZE, DET_SIZE)
 
   @staticmethod
   def available(models_dir: Path = MODELS_DIR, compiled: bool | None = None) -> bool:
@@ -212,31 +240,38 @@ class SignDetector:
     return all((models_dir / f'{name}{ext}').exists() for name in ('sign_detector', 'sign_classifier'))
 
   def detect(self, rgb: np.ndarray) -> list[Detection]:
-    """rgb: full camera frame, HxWx3 uint8"""
-    h, w = rgb.shape[:2]
+    """rgb: full camera frame, HxWx3 uint8. Converted to NV12 so it takes the same path as camera frames."""
+    data, stride, uv_offset = rgb_to_nv12(rgb)
+    return self.detect_nv12(data, stride, uv_offset, rgb.shape[1], rgb.shape[0])
+
+  def detect_nv12(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int) -> list[Detection]:
+    """data: NV12 frame (VisionIPC buffer layout), w x h. Boxes are normalized to the full frame."""
     rx0, ry0, rx1, ry1 = roi_pixels(self.camera, w, h)
-    return self.detect_roi(rgb[ry0:ry1, rx0:rx1], w, h)
+    rw, rh = rx1 - rx0, ry1 - ry0
 
-  def detect_roi(self, roi: np.ndarray, w: int, h: int) -> list[Detection]:
-    """roi: the camera's ROI (see roi_pixels) as HxWx3 uint8 RGB; w, h: full frame size. Boxes are normalized to the full frame."""
-    rx0, ry0, _, _ = roi_pixels(self.camera, w, h)
-    rh, rw = roi.shape[:2]
-
-    img, scale, pad_x, pad_y = letterbox(roi, self.det_size)
+    # detector: half-resolution ROI, letterboxed
+    img, scale, pad_x, pad_y = letterbox(nv12_to_rgb_half(data, stride, uv_offset, (rx0, ry0, rx1, ry1)), self.det_w, self.det_h)
     boxes = decode_boxes(self.detector(to_nchw(img)), self.min_score)
     boxes = boxes[boxes[:, 5] == SIGN_CLASS]
     if len(boxes) == 0:
       return []
 
-    # back to ROI pixels
-    xyxy = (boxes[:, :4] - [pad_x, pad_y, pad_x, pad_y]) / scale
+    # back to full-resolution ROI pixels
+    xyxy = (boxes[:, :4] - [pad_x, pad_y, pad_x, pad_y]) / scale * 2
     xyxy = np.clip(xyxy, 0, [rw, rh, rw, rh]).astype(int)
     keep = (xyxy[:, 2] - xyxy[:, 0] >= 8) & (xyxy[:, 3] - xyxy[:, 1] >= 8)
     xyxy, scores = xyxy[keep], boxes[keep, 4]
     if len(xyxy) == 0:
       return []
 
-    crops = [to_nchw(classifier_crop(roi, b)) for b in xyxy]
+    # classifier: full resolution, converting only each crop's region (clipped to the ROI, as in training)
+    crops = []
+    for x0, y0, x1, y1 in xyxy:
+      bw, bh = x1 - x0, y1 - y0
+      cx0, cy0 = max(0, int(x0 - CLS_MARGIN_X * bw)) & ~1, max(0, int(y0 - CLS_MARGIN_TOP * bh)) & ~1
+      cx1, cy1 = min(rw, int(x1 + CLS_MARGIN_X * bw) + 2) & ~1, min(rh, int(y1 + CLS_MARGIN_BOTTOM * bh) + 2) & ~1
+      region = nv12_to_rgb(data, stride, uv_offset, (rx0 + cx0, ry0 + cy0, rx0 + cx1, ry0 + cy1))
+      crops.append(to_nchw(classifier_crop(region, (x0 - cx0, y0 - cy0, x1 - cx0, y1 - cy0))))
     # one crop per call: tinygrad's OnnxRunner fixes dynamic dims on first use
     probs = softmax(np.concatenate([self.classifier(c) for c in crops]))
 

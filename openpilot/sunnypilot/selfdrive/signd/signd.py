@@ -21,7 +21,7 @@ from openpilot.common.realtime import set_core_affinity
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.selfdrive.signd import SIGND_RATE_HZ
-from openpilot.sunnypilot.selfdrive.signd.detector import SignDetector, nv12_to_rgb, roi_pixels
+from openpilot.sunnypilot.selfdrive.signd.detector import SignDetector
 from openpilot.sunnypilot.selfdrive.signd.sign_filter import SignFilter, SignFilterState
 
 CAMERA = 'road'
@@ -84,9 +84,7 @@ def main():
       is_metric = new_is_metric
 
     t1 = time.perf_counter()
-    roi = roi_pixels(CAMERA, buf.width, buf.height)
-    rgb = nv12_to_rgb(np.frombuffer(buf.data, dtype=np.uint8), buf.stride, buf.uv_offset, roi)
-    detections = detector.detect_roi(rgb, buf.width, buf.height)
+    detections = detector.detect_nv12(np.frombuffer(buf.data, dtype=np.uint8), buf.stride, buf.uv_offset, buf.width, buf.height)
     t2 = time.perf_counter()
 
     yaw_rate = -sm['deviceMotion'].angularVelocityDevice.z  # device z points down

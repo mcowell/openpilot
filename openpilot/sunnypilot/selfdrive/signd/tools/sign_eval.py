@@ -62,22 +62,23 @@ def probe_size(fn: Path) -> tuple[int, int]:
 
 
 def iter_frames(fn: Path, rate: float):
-  """Yields (camera frame index, rgb frame) sampled at `rate` Hz"""
+  """Yields (camera frame index, NV12 frame) sampled at `rate` Hz. NV12 is the camera's VisionIPC format, so frames take
+  exactly the on-device path (stride = width, chroma right after luma)."""
   w, h = probe_size(fn)
   step = max(1, round(CAMERA_FPS / rate))
   # decode every frame and subsample here: raw hevc has no timestamps, and the minimal ffmpeg
   # build in the openpilot venv has no filters
-  proc = subprocess.Popen(['ffmpeg', '-v', 'error', '-vsync', '0', '-i', str(fn), '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
+  proc = subprocess.Popen(['ffmpeg', '-v', 'error', '-vsync', '0', '-i', str(fn), '-f', 'rawvideo', '-pix_fmt', 'nv12', 'pipe:1'],
                           stdout=subprocess.PIPE)
   assert proc.stdout is not None
-  size = w * h * 3
+  size = w * h * 3 // 2
   frame = 0
   while True:
     buf = proc.stdout.read(size)
     if len(buf) < size:
       break
     if frame % step == 0:
-      yield frame, np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 3)
+      yield frame, np.frombuffer(buf, dtype=np.uint8)
     frame += 1
   proc.kill()
   proc.wait()
@@ -193,7 +194,7 @@ def main() -> int:
     except ImportError:
       print('--video and --dump-rois need opencv: uv pip install opencv-python-headless', file=sys.stderr)
       return 1
-  from openpilot.sunnypilot.selfdrive.signd.detector import MODELS_DIR, SignDetector, roi_pixels
+  from openpilot.sunnypilot.selfdrive.signd.detector import MODELS_DIR, SignDetector, nv12_to_rgb, roi_pixels
 
   segments = find_segments(args.route)
   if not segments:
@@ -225,10 +226,12 @@ def main() -> int:
     writer = None
     print(f'{seg_dir.name}: {cam.name}' + ('' if vehicle else ' (no vehicle state, distance/turn resets disabled)'))
 
-    for frame, rgb in iter_frames(cam, args.rate):
+    w, h = probe_size(cam)
+    for frame, nv12 in iter_frames(cam, args.rate):
       seg_t = frame / CAMERA_FPS
-      x0, y0, x1, y1 = roi_pixels(args.camera, rgb.shape[1], rgb.shape[0])
+      x0, y0, x1, y1 = roi_pixels(args.camera, w, h)
       if args.dump_rois:
+        rgb = nv12_to_rgb(nv12, w, w * h, (0, 0, w, h))
         cv2.imwrite(str(args.dump_rois / f'{route}--{seg}--{frame:04d}.jpg'), cv2.cvtColor(rgb[y0:y1, x0:x1], cv2.COLOR_RGB2BGR))
         continue
 
@@ -237,7 +240,7 @@ def main() -> int:
       if vehicle is not None:
         v_ego = float(np.interp(seg_t, vehicle[0], vehicle[1]))
         yaw_rate = float(np.interp(seg_t, vehicle[0], vehicle[2]))
-      dets = detector.detect(rgb)
+      dets = detector.detect_nv12(nv12, w, w * h, w, h)
       state = sign_filter.update(seg * SEGMENT_SECONDS + seg_t, dets, v_ego, yaw_rate)
       truth = label_at(intervals, frame)
       timeline.append({'route': route, 'segment': seg, 'frame': frame, 't': seg * SEGMENT_SECONDS + seg_t,
@@ -245,7 +248,7 @@ def main() -> int:
                        'speed_limit': state.speed_limit, 'confidence': state.confidence, 'truth': truth})
 
       if args.video:
-        img = annotate(rgb, (x0, y0, x1, y1), dets, state.speed_limit, truth)
+        img = annotate(nv12_to_rgb(nv12, w, w * h, (0, 0, w, h)), (x0, y0, x1, y1), dets, state.speed_limit, truth)
         if writer is None:
           fn = args.out / f'{route}--{seg}--{args.camera}.mp4'
           writer = cv2.VideoWriter(str(fn), cv2.VideoWriter.fourcc(*'mp4v'), args.rate, img.shape[1::-1])
