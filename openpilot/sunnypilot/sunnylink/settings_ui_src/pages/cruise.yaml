@@ -173,6 +173,16 @@ sections:
         label: Map Data Priority
       - value: 4
         label: Combined
+    - key: SpeedLimitVision
+      widget: multiple_button
+      title: Camera Speed Limit Signs
+      options:
+      - value: 0
+        label: 'Off'
+      - value: 1
+        label: Fallback
+      - value: 2
+        label: Priority
     - key: SpeedLimitOffsetType
       widget: multiple_button
       title: Speed Limit Offset Type

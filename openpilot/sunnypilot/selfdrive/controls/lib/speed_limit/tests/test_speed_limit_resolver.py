@@ -13,7 +13,7 @@ from openpilot.cereal import custom
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import LIMIT_MAX_MAP_DATA_AGE
 
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_resolver import SpeedLimitResolver, ALL_SOURCES
-from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Policy
+from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Policy, VisionMode
 from openpilot.common.test import OpenpilotTestCase
 
 SpeedLimitSource = custom.LongitudinalPlanSP.SpeedLimit.Source
@@ -26,9 +26,10 @@ def create_mock(properties, mocker):
   return mock
 
 
-def setup_sm_mock(mocker):
+def setup_sm_mock(mocker, vision_alive=True):
   cruise_speed_limit = random.uniform(0, 120)
   live_map_data_limit = random.uniform(0, 120)
+  vision_limit = random.uniform(0, 120)
 
   car_state = create_mock({
     'gasPressed': False,
@@ -45,6 +46,10 @@ def setup_sm_mock(mocker):
     'speedLimitAheadValid': 0.,
     'speedLimitAheadDistance': 0.,
   }, mocker)
+  live_vision = create_mock({
+    'speedLimit': vision_limit,
+    'speedLimitValid': True,
+  }, mocker)
   gps_data = create_mock({
     'unixTimestampMillis': time.monotonic() * 1e3,
   }, mocker)
@@ -53,8 +58,10 @@ def setup_sm_mock(mocker):
     'carState': car_state,
     'liveMapDataSP': live_map_data,
     'carStateSP': car_state_sp,
+    'liveVisionSpeedLimitSP': live_vision,
     'gpsLocation': gps_data,
   }[key]
+  sm_mock.alive = {'liveVisionSpeedLimitSP': vision_alive}
   return sm_mock
 
 
@@ -145,3 +152,73 @@ class TestSpeedLimitResolverValidation(OpenpilotTestCase):
     resolver._get_from_map_data(sm_mock)
     assert resolver.limit_solutions[SpeedLimitSource.map] == 0.
     assert resolver.distance_solutions[SpeedLimitSource.map] == 0.
+
+
+class TestSpeedLimitResolverVision(OpenpilotTestCase):
+
+  @parameterized.expand(list(Policy), names=["policy"])
+  def test_vision_off_ignored(self, resolver_class, policy, mocker):
+    resolver = resolver_class()
+    resolver.policy = policy
+    resolver.vision_mode = VisionMode.off
+    resolver.update(20, setup_sm_mock(mocker))
+    assert resolver.limit_solutions[SpeedLimitSource.vision] == 0.
+    assert resolver.source != SpeedLimitSource.vision
+
+  @parameterized.expand([(p,) for p in Policy if p != Policy.combined], names=["policy"])
+  def test_vision_priority(self, resolver_class, policy, mocker):
+    resolver = resolver_class()
+    resolver.policy = policy
+    resolver.vision_mode = VisionMode.priority
+    sm_mock = setup_sm_mock(mocker)
+    resolver.update(20, sm_mock)
+    assert resolver.source == SpeedLimitSource.vision
+    assert resolver.speed_limit == sm_mock['liveVisionSpeedLimitSP'].speedLimit
+
+  @parameterized.expand([(p,) for p in Policy if p != Policy.combined], names=["policy"])
+  def test_vision_fallback(self, resolver_class, policy, mocker):
+    resolver = resolver_class()
+    # updating twice reloads params, so set them there too
+    resolver.params.put("SpeedLimitPolicy", int(policy), block=True)
+    resolver.params.put("SpeedLimitVision", int(VisionMode.fallback), block=True)
+    resolver.policy = policy
+    resolver.vision_mode = VisionMode.fallback
+    sm_mock = setup_sm_mock(mocker)
+
+    # other sources have data: vision is not used
+    resolver.update(20, sm_mock)
+    assert resolver.source != SpeedLimitSource.vision
+
+    # no car or map data (e.g. a car without speed limit on CAN, outside map coverage): vision is used
+    sm_mock['carStateSP'].speedLimit = 0.
+    sm_mock['liveMapDataSP'].speedLimitValid = False
+    resolver.update(20, sm_mock)
+    assert resolver.source == SpeedLimitSource.vision
+    assert resolver.speed_limit == sm_mock['liveVisionSpeedLimitSP'].speedLimit
+
+  @parameterized.expand([(VisionMode.fallback,), (VisionMode.priority,)], names=["vision_mode"])
+  def test_vision_combined_takes_lowest(self, resolver_class, vision_mode, mocker):
+    resolver = resolver_class()
+    resolver.policy = Policy.combined
+    resolver.vision_mode = vision_mode
+    sm_mock = setup_sm_mock(mocker)
+    sm_mock['carStateSP'].speedLimit = 30.
+    sm_mock['liveMapDataSP'].speedLimit = 25.
+    sm_mock['liveVisionSpeedLimitSP'].speedLimit = 20.
+    resolver.update(20, sm_mock)
+    assert resolver.source == SpeedLimitSource.vision
+    assert resolver.speed_limit == 20.
+
+  @parameterized.expand([(VisionMode.fallback,), (VisionMode.priority,)], names=["vision_mode"])
+  def test_vision_stale_or_invalid_ignored(self, resolver_class, vision_mode, mocker):
+    resolver = resolver_class()
+    resolver.policy = Policy.map_data_only
+    resolver.vision_mode = vision_mode
+
+    resolver.update(20, setup_sm_mock(mocker, vision_alive=False))
+    assert resolver.limit_solutions[SpeedLimitSource.vision] == 0.
+
+    sm_mock = setup_sm_mock(mocker)
+    sm_mock['liveVisionSpeedLimitSP'].speedLimitValid = False
+    resolver.update(20, sm_mock)
+    assert resolver.limit_solutions[SpeedLimitSource.vision] == 0.

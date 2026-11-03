@@ -16,6 +16,12 @@ class Policy(IntEnumBase):
   combined = 4
 
 
+class VisionMode(IntEnumBase):
+  off = 0
+  fallback = 1  # use speed limit signs from the camera when the policy's sources have nothing
+  priority = 2  # prefer speed limit signs from the camera over the policy's sources
+
+
 class OffsetType(IntEnumBase):
   off = 0
   fixed = 1

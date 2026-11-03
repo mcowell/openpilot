@@ -25,6 +25,14 @@ SPEED_LIMIT_POLICY_DESCRIPTIONS = [
   tr("Combined: Use combined Speed Limit data from Car & OpenStreetMaps")
 ]
 
+SPEED_LIMIT_VISION_BUTTONS = [tr("Off"), tr("Fallback"), tr("Priority")]
+
+SPEED_LIMIT_VISION_DESCRIPTIONS = [
+  tr("Off: Do not read speed limit signs"),
+  tr("Fallback: Read speed limit signs with the camera, used when the source above has no data"),
+  tr("Priority: Read speed limit signs with the camera, used before the source above"),
+]
+
 
 class SpeedLimitPolicyLayout(Widget):
   def __init__(self, back_btn_callback: Callable):
@@ -44,14 +52,27 @@ class SpeedLimitPolicyLayout(Widget):
       button_width=250,
     )
 
+    self._speed_limit_vision = multiple_button_item_sp(
+      title=lambda: tr("Camera Speed Limit Signs"),
+      description=self._get_vision_description,
+      buttons=SPEED_LIMIT_VISION_BUTTONS,
+      param="SpeedLimitVision",
+      button_width=250,
+    )
+
     items = [
-      self._speed_limit_policy
+      self._speed_limit_policy,
+      self._speed_limit_vision,
     ]
     return items
 
   @staticmethod
   def _get_policy_description():
     return get_highlighted_description(ui_state.params, "SpeedLimitPolicy", SPEED_LIMIT_POLICY_DESCRIPTIONS)
+
+  @staticmethod
+  def _get_vision_description():
+    return get_highlighted_description(ui_state.params, "SpeedLimitVision", SPEED_LIMIT_VISION_DESCRIPTIONS)
 
   def _render(self, rect):
     self._back_button.set_position(self._rect.x, self._rect.y + 20)
@@ -63,3 +84,4 @@ class SpeedLimitPolicyLayout(Widget):
   def show_event(self):
     self._scroller.show_event()
     self._speed_limit_policy.show_description(True)
+    self._speed_limit_vision.show_description(True)

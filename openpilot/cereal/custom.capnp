@@ -289,6 +289,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
       none @0;
       car @1;
       map @2;
+      vision @3;
     }
 
     enum AssistState {
@@ -483,7 +484,16 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   }
 }
 
-struct CustomReserved10 @0xcb9fd56c7057593a {
+struct LiveVisionSpeedLimitSP @0xcb9fd56c7057593a {
+  speedLimitValid @0 :Bool;
+  speedLimit @1 :Float32;  # m/s
+  speedLimitSign @2 :UInt8;  # value printed on the sign, in km/h or mph per isMetric
+  isMetric @3 :Bool;
+  confidence @4 :Float32;
+  timeSinceSign @5 :Float32;  # s since the limit was last confirmed by a sign
+  distanceSinceSign @6 :Float32;  # m
+  frameId @7 :UInt32;
+  modelExecutionTime @8 :Float32;
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {
