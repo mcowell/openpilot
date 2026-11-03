@@ -50,6 +50,23 @@ class TestSignDetector(OpenpilotTestCase):
     assert rx0 <= x * w and (x + bw) * w <= rx1
     assert ry0 <= y * h and (y + bh) * h <= ry1
 
+  def test_refine_finds_sign_near_prediction(self):
+    # the fake local detector always reports a box at (86, 60)-(106, 85) of its 192 px input
+    det = SignDetector('road', FAKE_MODELS)
+    w, h = 1928, 1208
+    data, uv_offset = rgb_to_nv12(np.zeros((h, w, 3), dtype=np.uint8), w)
+    c = det.refine(data, w, uv_offset, w, h, (500, 100, 520, 125))
+    assert c is not None and c.value == 60
+    # a 25 px sign gets the minimum 192 px window (no resize), centred a little low, so the box maps back 1:1
+    assert c.box == (500, 80, 520, 105)
+
+  def test_refine_ignores_box_away_from_prediction(self):
+    det = SignDetector('road', FAKE_MODELS)
+    w, h = 1928, 1208
+    data, uv_offset = rgb_to_nv12(np.zeros((h, w, 3), dtype=np.uint8), w)
+    # predicted box in the window's corner: the local detector's box doesn't overlap it
+    assert det.refine(data, w, uv_offset, w, h, (420, 30, 430, 42)) is None
+
   def test_available_requires_compiled_models_on_device(self):
     # the fake models are ONNX only: fine for PC tools and tests, not for the device
     assert SignDetector.available(FAKE_MODELS, compiled=False)

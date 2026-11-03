@@ -180,7 +180,8 @@ def main() -> int:
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   ap.add_argument('route', type=Path)
   ap.add_argument('--camera', choices=list(CAMERA_FILES), default='road')
-  ap.add_argument('--rate', type=float, default=5., help='Hz to run detection at (camera is 20 Hz)')
+  ap.add_argument('--rate', type=float, default=2., help='Hz to sample the timeline at (and to run detection at with --fixed)')
+  ap.add_argument('--fixed', action='store_true', help='full detection at --rate instead of signd\'s scan + burst scheduling')
   ap.add_argument('--models', type=Path, help='directory with sign_detector.onnx and sign_classifier.onnx')
   ap.add_argument('--labels', type=Path, help='labels.csv to score against')
   ap.add_argument('--out', type=Path, default=Path('sign_eval_out'))
@@ -195,6 +196,7 @@ def main() -> int:
       print('--video and --dump-rois need opencv: uv pip install opencv-python-headless', file=sys.stderr)
       return 1
   from openpilot.sunnypilot.selfdrive.signd.detector import MODELS_DIR, SignDetector, nv12_to_rgb, roi_pixels
+  from openpilot.sunnypilot.selfdrive.signd.reader import SignReader
 
   segments = find_segments(args.route)
   if not segments:
@@ -215,6 +217,8 @@ def main() -> int:
     args.dump_rois.mkdir(parents=True, exist_ok=True)
 
   sign_filter = SignFilter()
+  reader = SignReader(detector) if detector is not None and not args.fixed else None
+  sample_every = max(1, round(CAMERA_FPS / args.rate))
   timeline: list[dict] = []
   for route, seg, seg_dir in segments:
     cam = next((seg_dir / n for n in CAMERA_FILES[args.camera] if (seg_dir / n).exists()), None)
@@ -227,7 +231,8 @@ def main() -> int:
     print(f'{seg_dir.name}: {cam.name}' + ('' if vehicle else ' (no vehicle state, distance/turn resets disabled)'))
 
     w, h = probe_size(cam)
-    for frame, nv12 in iter_frames(cam, args.rate):
+    pending: list[Detection] = []  # detections since the last timeline sample
+    for frame, nv12 in iter_frames(cam, CAMERA_FPS if reader is not None else args.rate):
       seg_t = frame / CAMERA_FPS
       x0, y0, x1, y1 = roi_pixels(args.camera, w, h)
       if args.dump_rois:
@@ -240,10 +245,18 @@ def main() -> int:
       if vehicle is not None:
         v_ego = float(np.interp(seg_t, vehicle[0], vehicle[1]))
         yaw_rate = float(np.interp(seg_t, vehicle[0], vehicle[2]))
-      dets = detector.detect_nv12(nv12, w, w * h, w, h)
-      state = sign_filter.update(seg * SEGMENT_SECONDS + seg_t, dets, v_ego, yaw_rate)
+      t = seg * SEGMENT_SECONDS + seg_t
+      if reader is not None:
+        dets = reader.update(t, nv12, w, w * h, w, h) or []
+      else:
+        dets = detector.detect_nv12(nv12, w, w * h, w, h)
+      pending += dets
+      state = sign_filter.update(t, dets, v_ego, yaw_rate)
+      if frame % sample_every:
+        continue
+      dets, pending = pending, []
       truth = label_at(intervals, frame)
-      timeline.append({'route': route, 'segment': seg, 'frame': frame, 't': seg * SEGMENT_SECONDS + seg_t,
+      timeline.append({'route': route, 'segment': seg, 'frame': frame, 't': t,
                        'v_ego': v_ego, 'detections': [asdict(d) for d in dets],
                        'speed_limit': state.speed_limit, 'confidence': state.confidence, 'truth': truth})
 
@@ -267,6 +280,9 @@ def main() -> int:
 
   if labels:
     result = score(timeline)
+    if reader is not None:
+      seconds = len(timeline) / args.rate
+      result['runs_per_s'] = {k: round(v / seconds, 2) for k, v in reader.runs.items()}
     with open(args.out / 'score.json', 'w') as f:
       json.dump(result, f, indent=1)
     print(json.dumps(result, indent=1))

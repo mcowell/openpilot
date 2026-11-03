@@ -27,7 +27,7 @@ else:
 mac_brew_string = f'HOME={os.path.expanduser("~")}' if arch == 'Darwin' else ''
 compiler = Dir('#tinygrad_repo/examples/openpilot').abspath
 
-for name in ('sign_detector', 'sign_classifier'):
+for name in ('sign_detector', 'sign_detector_local', 'sign_classifier'):
   onnx = File(f'models/{name}.onnx')
   if not os.path.isfile(onnx.abspath):
     continue  # models are optional; signd doesn't run without them

@@ -20,6 +20,7 @@ Model contract (both ONNX, single input each, see README.md):
                       (advisory, school zone, minimum, truck, unreadable...), then end of zone ("ENDS / FIN" tab)
 """
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +36,7 @@ CLS_MARGIN_X, CLS_MARGIN_TOP, CLS_MARGIN_BOTTOM = 0.5, 0.2, 1.2
 REJECT, END = len(SPEED_LIMIT_VALUES), len(SPEED_LIMIT_VALUES) + 1
 SIGN_CLASS = 0
 NMS_IOU = 0.5
+LOCAL_SIGN_PX = 30  # target panel height in the local detector's input, px
 
 # Normalized (x0, y0, x1, y1) region where roadside signs appear, per camera.
 # Right side of the road and above the horizon; signs on the left of divided highways are out of scope for v1.
@@ -222,6 +224,16 @@ def load_model(models_dir: Path, name: str) -> 'CompiledModel | OnnxModel':
   return CompiledModel(pkl) if pkl.exists() else OnnxModel(models_dir / f'{name}.onnx')
 
 
+@dataclass(frozen=True)
+class Candidate:
+  """A detected sign, in full-resolution ROI pixels. value: the speed, 0 for end of zone, None if the classifier rejected it
+  (often just too far away to read yet)."""
+  box: tuple[int, int, int, int]  # x0, y0, x1, y1
+  score: float  # detector score
+  value: int | None
+  confidence: float  # detector score * classifier probability, 0 when rejected
+
+
 class SignDetector:
   def __init__(self, camera: str = 'road', models_dir: Path = MODELS_DIR, min_score: float = 0.3):
     self.camera = camera
@@ -230,6 +242,10 @@ class SignDetector:
     self.classifier = load_model(models_dir, 'sign_classifier')
     dh, dw = self.detector.input_shape[-2:]
     self.det_h, self.det_w = (dh, dw) if isinstance(dh, int) and isinstance(dw, int) else (DET_SIZE, DET_SIZE)
+    # optional small detector for re-finding a tracked sign in a window around it (see refine())
+    has_local = any((models_dir / f'sign_detector_local{ext}').exists() for ext in ('_tinygrad.pkl', '.onnx'))
+    self.local = load_model(models_dir, 'sign_detector_local') if has_local else None
+    self.local_size = int(self.local.input_shape[-1]) if self.local is not None else 0
 
   @staticmethod
   def available(models_dir: Path = MODELS_DIR, compiled: bool | None = None) -> bool:
@@ -246,41 +262,73 @@ class SignDetector:
 
   def detect_nv12(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int) -> list[Detection]:
     """data: NV12 frame (VisionIPC buffer layout), w x h. Boxes are normalized to the full frame."""
+    return [d for c in self.scan(data, stride, uv_offset, w, h) if (d := self.to_detection(c, w, h)) is not None]
+
+  def to_detection(self, c: Candidate, w: int, h: int) -> Detection | None:
+    if c.value is None:
+      return None
+    rx0, ry0, _, _ = roi_pixels(self.camera, w, h)
+    x0, y0, x1, y1 = c.box
+    box = (float((rx0 + x0) / w), float((ry0 + y0) / h), float((x1 - x0) / w), float((y1 - y0) / h))
+    # an end-of-zone sign is reported as value 0: once confirmed, the filter drops the held limit
+    return Detection(c.value, c.confidence, box)
+
+  def scan(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int) -> list[Candidate]:
+    """Full detector over the ROI (half resolution, letterboxed), then the classifier on each box"""
     rx0, ry0, rx1, ry1 = roi_pixels(self.camera, w, h)
     rw, rh = rx1 - rx0, ry1 - ry0
-
-    # detector: half-resolution ROI, letterboxed
     img, scale, pad_x, pad_y = letterbox(nv12_to_rgb_half(data, stride, uv_offset, (rx0, ry0, rx1, ry1)), self.det_w, self.det_h)
     boxes = decode_boxes(self.detector(to_nchw(img)), self.min_score)
     boxes = boxes[boxes[:, 5] == SIGN_CLASS]
-    if len(boxes) == 0:
-      return []
-
     # back to full-resolution ROI pixels
-    xyxy = (boxes[:, :4] - [pad_x, pad_y, pad_x, pad_y]) / scale * 2
-    xyxy = np.clip(xyxy, 0, [rw, rh, rw, rh]).astype(int)
-    keep = (xyxy[:, 2] - xyxy[:, 0] >= 8) & (xyxy[:, 3] - xyxy[:, 1] >= 8)
-    xyxy, scores = xyxy[keep], boxes[keep, 4]
-    if len(xyxy) == 0:
-      return []
+    xyxy = np.clip((boxes[:, :4] - [pad_x, pad_y, pad_x, pad_y]) / scale * 2, 0, [rw, rh, rw, rh]).astype(int)
+    return self._classify(data, stride, uv_offset, w, h, xyxy, boxes[:, 4])
 
-    # classifier: full resolution, converting only each crop's region (clipped to the ROI, as in training)
-    crops = []
-    for x0, y0, x1, y1 in xyxy:
+  def refine(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> Candidate | None:
+    """Re-find a tracked sign near box (x0, y0, x1, y1, ROI pixels, e.g. predicted from its motion) with the small local
+    detector, then classify it. None if the sign isn't found there."""
+    rx0, ry0, rx1, ry1 = roi_pixels(self.camera, w, h)
+    rw, rh = rx1 - rx0, ry1 - ry0
+    x0, y0, x1, y1 = box
+    assert self.local is not None
+    # window sized so the sign is ~LOCAL_SIGN_PX in the local input: the scale the detector saw in training
+    side = int(np.clip((y1 - y0) * self.local_size / LOCAL_SIGN_PX, self.local_size, min(rw, rh)))
+    cx, cy = (x0 + x1) / 2, (y0 + y1 * 2) / 3  # a little low: the window includes the tabs below the panel
+    wx0 = int(np.clip(cx - side / 2, 0, rw - side)) & ~1
+    wy0 = int(np.clip(cy - side / 2, 0, rh - side)) & ~1
+    side &= ~1
+    region = nv12_to_rgb(data, stride, uv_offset, (rx0 + wx0, ry0 + wy0, rx0 + wx0 + side, ry0 + wy0 + side))
+    img, scale, pad_x, pad_y = letterbox(region, self.local_size, self.local_size)
+    boxes = decode_boxes(self.local(to_nchw(img)), self.min_score)
+    boxes = boxes[boxes[:, 5] == SIGN_CLASS]
+    if len(boxes) == 0:
+      return None
+    xyxy = (boxes[:, :4] - [pad_x, pad_y, pad_x, pad_y]) / scale + [wx0, wy0, wx0, wy0]
+    # the sign we're tracking: overlapping the prediction, best score
+    ix = np.clip(np.minimum(xyxy[:, 2], x1) - np.maximum(xyxy[:, 0], x0), 0, None)
+    iy = np.clip(np.minimum(xyxy[:, 3], y1) - np.maximum(xyxy[:, 1], y0), 0, None)
+    overlap = ix * iy / np.maximum(1., (x1 - x0) * (y1 - y0))
+    if overlap.max() <= 0.:
+      return None
+    best = int(np.argmax(np.where(overlap > 0., boxes[:, 4], -1.)))
+    best_box = np.clip(xyxy[best:best + 1], 0, [rw, rh, rw, rh]).astype(int)
+    found = self._classify(data, stride, uv_offset, w, h, best_box, boxes[best:best + 1, 4])
+    return found[0] if found else None
+
+  def _classify(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, xyxy: np.ndarray, scores: np.ndarray) -> list[Candidate]:
+    rx0, ry0, rx1, ry1 = roi_pixels(self.camera, w, h)
+    rw, rh = rx1 - rx0, ry1 - ry0
+    keep = (xyxy[:, 2] - xyxy[:, 0] >= 8) & (xyxy[:, 3] - xyxy[:, 1] >= 8)
+    out = []
+    for (x0, y0, x1, y1), score in zip(xyxy[keep], scores[keep], strict=True):
+      # full resolution, converting only the crop's region (clipped to the ROI, as in training)
       bw, bh = x1 - x0, y1 - y0
       cx0, cy0 = max(0, int(x0 - CLS_MARGIN_X * bw)) & ~1, max(0, int(y0 - CLS_MARGIN_TOP * bh)) & ~1
       cx1, cy1 = min(rw, int(x1 + CLS_MARGIN_X * bw) + 2) & ~1, min(rh, int(y1 + CLS_MARGIN_BOTTOM * bh) + 2) & ~1
       region = nv12_to_rgb(data, stride, uv_offset, (rx0 + cx0, ry0 + cy0, rx0 + cx1, ry0 + cy1))
-      crops.append(to_nchw(classifier_crop(region, (x0 - cx0, y0 - cy0, x1 - cx0, y1 - cy0))))
-    # one crop per call: tinygrad's OnnxRunner fixes dynamic dims on first use
-    probs = softmax(np.concatenate([self.classifier(c) for c in crops]))
-
-    detections = []
-    for (x0, y0, x1, y1), score, p in zip(xyxy, scores, probs, strict=True):
+      # one crop per call: tinygrad's OnnxRunner fixes dynamic dims on first use
+      p = softmax(self.classifier(to_nchw(classifier_crop(region, (x0 - cx0, y0 - cy0, x1 - cx0, y1 - cy0)))))[0]
       idx = int(p.argmax())
-      if idx == REJECT:
-        continue
-      box = (float((rx0 + x0) / w), float((ry0 + y0) / h), float((x1 - x0) / w), float((y1 - y0) / h))
-      # an end-of-zone sign is reported as value 0: once confirmed, the filter drops the held limit
-      detections.append(Detection(SPEED_LIMIT_VALUES[idx] if idx < REJECT else 0, float(score * p[idx]), box))
-    return detections
+      value = None if idx == REJECT else (SPEED_LIMIT_VALUES[idx] if idx < REJECT else 0)
+      out.append(Candidate((int(x0), int(y0), int(x1), int(y1)), float(score), value, float(score * p[idx]) if value is not None else 0.))
+    return out

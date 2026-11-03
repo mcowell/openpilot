@@ -23,6 +23,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.selfdrive.signd import SIGND_RATE_HZ
 from openpilot.sunnypilot.selfdrive.signd.detector import SignDetector
+from openpilot.sunnypilot.selfdrive.signd.reader import SignReader
 from openpilot.sunnypilot.selfdrive.signd.sign_filter import SignFilter, SignFilterState
 
 CAMERA = 'road'
@@ -61,6 +62,7 @@ def main():
     time.sleep(0.1)
 
   detector = SignDetector(CAMERA)
+  reader = SignReader(detector)
   sign_filter = SignFilter()
   cloudlog.warning("signd: models loaded, starting")
 
@@ -68,17 +70,13 @@ def main():
   pm = messaging.PubMaster(['liveVisionSpeedLimitSP'])
 
   is_metric = params.get_bool("IsMetric")
-  last_params_update = last_run = 0.
+  last_params_update = last_publish = exec_time = 0.
   while True:
     buf = vipc_client.recv()
     if buf is None:
       continue
 
     now = time.monotonic()
-    if now - last_run < 1. / SIGND_RATE_HZ:
-      continue
-    last_run = now
-
     sm.update(0)
     if now - last_params_update > PARAMS_UPDATE_PERIOD:
       last_params_update = now
@@ -87,13 +85,17 @@ def main():
         sign_filter.reset()  # held value is in the old units
       is_metric = new_is_metric
 
+    # every frame goes to the reader, which decides whether to scan, read a tracked sign, or do nothing
     t1 = time.perf_counter()
-    detections = detector.detect_nv12(np.frombuffer(buf.data, dtype=np.uint8), buf.stride, buf.uv_offset, buf.width, buf.height)
-    t2 = time.perf_counter()
+    detections = reader.update(now, np.frombuffer(buf.data, dtype=np.uint8), buf.stride, buf.uv_offset, buf.width, buf.height)
+    if detections is not None:
+      exec_time = time.perf_counter() - t1
 
     yaw_rate = -sm['deviceMotion'].angularVelocityDevice.z  # device z points down
-    state = sign_filter.update(now, detections, sm['carState'].vEgo, yaw_rate)
-    pm.send('liveVisionSpeedLimitSP', get_vision_speed_limit_packet(state, is_metric, vipc_client.frame_id, t2 - t1))
+    state = sign_filter.update(now, detections or [], sm['carState'].vEgo, yaw_rate)
+    if now - last_publish >= 1. / SIGND_RATE_HZ:
+      last_publish = now
+      pm.send('liveVisionSpeedLimitSP', get_vision_speed_limit_packet(state, is_metric, vipc_client.frame_id, exec_time))
 
 
 if __name__ == "__main__":

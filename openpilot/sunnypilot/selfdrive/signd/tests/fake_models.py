@@ -15,24 +15,28 @@ import numpy as np
 from openpilot.sunnypilot.selfdrive.signd import SPEED_LIMIT_VALUES
 from openpilot.sunnypilot.selfdrive.signd.detector import CLS_H, CLS_W, DET_SIZE, END
 
+LOCAL_SIZE = 192
 
-def write_fake_models(out_dir: Path, value: int = 80, box=(400., 200., 440., 250.), score: float = 0.9) -> None:
+
+def write_fake_models(out_dir: Path, value: int = 80, box=(400., 200., 440., 250.), score: float = 0.9,
+                      local_box=(86., 60., 106., 85.)) -> None:
   import onnx
   from onnx import TensorProto, helper, numpy_helper
 
   out_dir.mkdir(parents=True, exist_ok=True)
 
-  # detector: image -> one fixed box (the input is reduced and multiplied by 0 so it stays in the graph)
-  boxes = numpy_helper.from_array(np.array([[*box, score, 0.]], dtype=np.float32), 'const_boxes')
-  graph = helper.make_graph(
-    [helper.make_node('ReduceMax', ['image'], ['m'], keepdims=0),
-     helper.make_node('Mul', ['m', 'zero'], ['z']),
-     helper.make_node('Add', ['const_boxes', 'z'], ['boxes'])],
-    'fake_sign_detector',
-    [helper.make_tensor_value_info('image', TensorProto.FLOAT, [1, 3, DET_SIZE, DET_SIZE])],
-    [helper.make_tensor_value_info('boxes', TensorProto.FLOAT, [1, 6])],
-    [boxes, numpy_helper.from_array(np.array(0., dtype=np.float32), 'zero')])
-  onnx.save(helper.make_model(graph, opset_imports=[helper.make_opsetid('', 17)], ir_version=8), out_dir / 'sign_detector.onnx')
+  # detectors: image -> one fixed box (the input is reduced and multiplied by 0 so it stays in the graph)
+  for name, size, b in (('sign_detector', DET_SIZE, box), ('sign_detector_local', LOCAL_SIZE, local_box)):
+    boxes = numpy_helper.from_array(np.array([[*b, score, 0.]], dtype=np.float32), 'const_boxes')
+    graph = helper.make_graph(
+      [helper.make_node('ReduceMax', ['image'], ['m'], keepdims=0),
+       helper.make_node('Mul', ['m', 'zero'], ['z']),
+       helper.make_node('Add', ['const_boxes', 'z'], ['boxes'])],
+      f'fake_{name}',
+      [helper.make_tensor_value_info('image', TensorProto.FLOAT, [1, 3, size, size])],
+      [helper.make_tensor_value_info('boxes', TensorProto.FLOAT, [1, 6])],
+      [boxes, numpy_helper.from_array(np.array(0., dtype=np.float32), 'zero')])
+    onnx.save(helper.make_model(graph, opset_imports=[helper.make_opsetid('', 17)], ir_version=8), out_dir / f'{name}.onnx')
 
   # classifier: crop -> logits peaked at `value`
   logits = np.full((1, END + 1), -5., dtype=np.float32)
