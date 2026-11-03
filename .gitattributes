@@ -14,3 +14,5 @@ openpilot/sunnypilot/modeld_v2/models/*.pkl filter=lfs diff=lfs merge=lfs -text
 
 openpilot/selfdrive/car/tests/test_models_segs.txt filter=lfs diff=lfs merge=lfs -text
 openpilot/common/hardware/comma/updater filter=lfs diff=lfs merge=lfs -text
+# signd PoC models live in git, not the upstream LFS store
+openpilot/sunnypilot/selfdrive/signd/**/*.onnx -filter -diff -merge binary
