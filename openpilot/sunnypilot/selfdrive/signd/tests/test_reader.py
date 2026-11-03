@@ -8,6 +8,7 @@ import numpy as np
 
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.sunnypilot.selfdrive.signd.detector import Candidate
+from openpilot.sunnypilot.selfdrive.signd.guard import GuardLevel
 from openpilot.sunnypilot.selfdrive.signd.reader import ReaderParams, SignReader, Track
 from openpilot.sunnypilot.selfdrive.signd.sign_filter import Detection
 
@@ -44,11 +45,11 @@ class StubDetector:
     return None if c.value is None else Detection(c.value, c.confidence, (0., 0., 0.01, 0.02))
 
 
-def run(reader, det, seconds, start=0.):
+def run(reader, det, seconds, start=0., level=GuardLevel.normal):
   out = []
   for i in range(round(seconds / DT)):
     det.t = start + i * DT
-    out.append(reader.update(det.t, *FRAME))
+    out.append(reader.update(det.t, *FRAME, level))
   return out
 
 
@@ -110,6 +111,21 @@ class TestSignReader(OpenpilotTestCase):
     det = TwoSigns()
     run(SignReader(det), det, 1.)
     assert det.looked == [100, 300, 100]
+
+  def test_paused_does_nothing(self):
+    det = StubDetector()
+    out = run(SignReader(det), det, 3., level=GuardLevel.paused)
+    assert det.calls == [] and all(d is None for d in out)
+
+  def test_reduced_scans_only(self):
+    det = StubDetector()
+    run(SignReader(det), det, 3., level=GuardLevel.reduced)
+    assert [(kind, round(t, 2)) for kind, t in det.calls] == [('scan', 0.), ('scan', 1.), ('scan', 2.)]
+
+  def test_reduced_without_local_detector_scans_at_1hz(self):
+    det = StubDetector(local=False)
+    run(SignReader(det), det, 2., level=GuardLevel.reduced)
+    assert [round(t, 2) for _, t in det.calls] == [0., 1.]
 
   def test_without_local_detector_scans_at_2hz(self):
     # no tracking possible: fixed full scans, as before tracking existed

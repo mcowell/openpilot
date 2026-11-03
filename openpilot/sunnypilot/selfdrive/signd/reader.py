@@ -16,6 +16,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from openpilot.sunnypilot.selfdrive.signd.detector import Candidate
+from openpilot.sunnypilot.selfdrive.signd.guard import GuardLevel
 from openpilot.sunnypilot.selfdrive.signd.sign_filter import Detection
 
 
@@ -81,13 +82,18 @@ class SignReader:
     self._next = 0  # round-robin track index
     self.runs = {'scan': 0, 'read': 0}
 
-  def update(self, t: float, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int) -> list[Detection] | None:
-    """Call with every camera frame. Returns detections when detector work ran on this frame, else None."""
+  def update(self, t: float, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int,
+             level: GuardLevel = GuardLevel.normal) -> list[Detection] | None:
+    """Call with every camera frame. Returns detections when detector work ran on this frame, else None.
+    level (guard.ModelGuard): reduced scans only at scan_hz, paused does nothing."""
     p = self.params
     self.tracks = [tr for tr in self.tracks if t - tr.start_t <= p.track_time and tr.misses <= p.max_misses]
+    if level == GuardLevel.paused:
+      return None
 
     local = self.detector.local is not None
-    if t - self.last_scan >= 1. / (p.scan_hz if local else p.fallback_scan_hz):
+    scan_hz = p.fallback_scan_hz if not local and level == GuardLevel.normal else p.scan_hz
+    if t - self.last_scan >= 1. / scan_hz:
       self.last_scan = self.last_read = t
       self.runs['scan'] += 1
       found = self.detector.scan(data, stride, uv_offset, w, h)
@@ -95,7 +101,7 @@ class SignReader:
         self._match(t, found)
       return self._detections(found, w, h)
 
-    if local and self.tracks and t - self.last_read >= 1. / p.track_hz:
+    if local and level == GuardLevel.normal and self.tracks and t - self.last_read >= 1. / p.track_hz:
       self.last_read = t
       self.runs['read'] += 1
       self._next %= len(self.tracks)

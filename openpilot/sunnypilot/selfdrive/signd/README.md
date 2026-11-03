@@ -20,6 +20,7 @@ road camera ──VisionIPC──> signd ──liveVisionSpeedLimitSP──> pla
 - **End of zone:** signs with an "ENDS / FIN" tab are classified as *end*. Once confirmed, signd drops the held limit and reports none, so the resolver falls back to the other sources.
 - **Scheduling (`reader.py`):** signs are often readable for only ~1 s, so instead of a fixed rate signd scans the ROI with the full detector once a second, and for ~2 s after finding a sign reads it 4 times a second with the small local detector (to re-find it) plus the classifier. On held-out drives this matches a fixed 2 Hz scan with ~45% less GPU time. On the 3X, compiled: scan ~90 ms, burst read ~26 ms (local detector 13.6 ms + classifier). `liveVisionSpeedLimitSP` is published at 2 Hz (`SIGND_RATE_HZ`).
 - **Priority:** signd runs at the lowest GPU priority and on the little CPU cores, so the driving model preempts it.
+- **Guard (`guard.py`):** selfdrived soft-disables (modeldLagging) when `modelV2.frameDropPerc` > 1, and one dropped frame already reads ~0.5%. On any new dropped frame signd pauses detector work (5 s, doubling up to 60 s if drops recur), then runs scans only until 20 s pass without drops.
 
 ## Model contract
 

@@ -23,6 +23,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.selfdrive.signd import SIGND_RATE_HZ
 from openpilot.sunnypilot.selfdrive.signd.detector import SignDetector
+from openpilot.sunnypilot.selfdrive.signd.guard import ModelGuard
 from openpilot.sunnypilot.selfdrive.signd.reader import SignReader
 from openpilot.sunnypilot.selfdrive.signd.sign_filter import SignFilter, SignFilterState
 
@@ -63,10 +64,11 @@ def main():
 
   detector = SignDetector(CAMERA)
   reader = SignReader(detector)
+  guard = ModelGuard()  # backs off if the driving model drops frames
   sign_filter = SignFilter()
   cloudlog.warning("signd: models loaded, starting")
 
-  sm = messaging.SubMaster(['carState', 'deviceMotion'])
+  sm = messaging.SubMaster(['carState', 'deviceMotion', 'modelV2'])
   pm = messaging.PubMaster(['liveVisionSpeedLimitSP'])
 
   is_metric = params.get_bool("IsMetric")
@@ -85,9 +87,14 @@ def main():
         sign_filter.reset()  # held value is in the old units
       is_metric = new_is_metric
 
+    prev_level = guard.level
+    level = guard.update(now, sm['modelV2'].frameDropPerc)
+    if level != prev_level:
+      cloudlog.warning(f"signd: guard {prev_level.name} -> {level.name} (modelV2.frameDropPerc {sm['modelV2'].frameDropPerc:.2f})")
+
     # every frame goes to the reader, which decides whether to scan, read a tracked sign, or do nothing
     t1 = time.perf_counter()
-    detections = reader.update(now, np.frombuffer(buf.data, dtype=np.uint8), buf.stride, buf.uv_offset, buf.width, buf.height)
+    detections = reader.update(now, np.frombuffer(buf.data, dtype=np.uint8), buf.stride, buf.uv_offset, buf.width, buf.height, level)
     if detections is not None:
       exec_time = time.perf_counter() - t1
 
