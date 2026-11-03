@@ -10,6 +10,7 @@ Runs only when SpeedLimitVision is enabled (see process_config.py).
 """
 import os
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -30,7 +31,16 @@ from openpilot.sunnypilot.selfdrive.signd.sign_filter import SignFilter, SignFil
 CAMERA = 'road'
 
 
-def get_vision_speed_limit_packet(state: SignFilterState, is_metric: bool, frame_id: int, exec_time: float) -> messaging.capnp._DynamicStructBuilder:
+@dataclass
+class DebugStatus:
+  guard_level: int = 0
+  tracking: bool = False
+  last_read_sign: int = 0
+  time_since_read: float = -1.
+
+
+def get_vision_speed_limit_packet(state: SignFilterState, is_metric: bool, frame_id: int, exec_time: float,
+                                  debug: DebugStatus | None = None) -> messaging.capnp._DynamicStructBuilder:
   msg = messaging.new_message('liveVisionSpeedLimitSP', valid=True)
   vsl = msg.liveVisionSpeedLimitSP
   vsl.speedLimitValid = state.speed_limit > 0
@@ -42,6 +52,11 @@ def get_vision_speed_limit_packet(state: SignFilterState, is_metric: bool, frame
   vsl.distanceSinceSign = state.distance_since_accept
   vsl.frameId = frame_id
   vsl.modelExecutionTime = exec_time
+  if debug is not None:
+    vsl.guardLevel = debug.guard_level
+    vsl.tracking = debug.tracking
+    vsl.lastReadSign = debug.last_read_sign
+    vsl.timeSinceRead = debug.time_since_read
   return msg
 
 
@@ -80,6 +95,7 @@ def main():
 
   is_metric = params.get_bool("IsMetric")
   last_params_update = last_publish = exec_time = 0.
+  last_read: tuple[int, float] | None = None  # (value, time) of the latest single reading
   while True:
     buf = vipc_client.recv()
     if buf is None:
@@ -108,12 +124,15 @@ def main():
       t1 = time.perf_counter()
       detections = reader.run(job)
       exec_time = time.perf_counter() - t1
+      if detections:
+        last_read = (max(detections, key=lambda d: d.confidence).value, now)
 
     yaw_rate = -sm['deviceMotion'].angularVelocityDevice.z  # device z points down
     state = sign_filter.update(now, detections or [], sm['carState'].vEgo, yaw_rate)
     if now - last_publish >= 1. / SIGND_RATE_HZ:
       last_publish = now
-      pm.send('liveVisionSpeedLimitSP', get_vision_speed_limit_packet(state, is_metric, vipc_client.frame_id, exec_time))
+      debug = DebugStatus(int(level), bool(reader.tracks), last_read[0] if last_read else 0, now - last_read[1] if last_read else -1.)
+      pm.send('liveVisionSpeedLimitSP', get_vision_speed_limit_packet(state, is_metric, vipc_client.frame_id, exec_time, debug))
 
 
 if __name__ == "__main__":

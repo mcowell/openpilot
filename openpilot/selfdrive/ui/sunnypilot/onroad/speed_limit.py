@@ -5,6 +5,7 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 import pyray as rl
@@ -26,6 +27,8 @@ METER_TO_MILE = 0.000621371
 AHEAD_THRESHOLD = 5
 SET_SPEED_NA = 255
 KM_TO_MILE = 0.621371
+VISION_STALE_TIME = 2.  # s without a signd message before its icon goes grey
+VISION_READ_SHOW_TIME = 3.  # s a raw sign reading stays beside the icon
 
 AssistState = custom.LongitudinalPlanSP.SpeedLimit.AssistState
 SpeedLimitSource = custom.LongitudinalPlanSP.SpeedLimit.Source
@@ -40,6 +43,10 @@ class Colors:
   DARK_GREY = rl.Color(77, 77, 77, 255)
   SUB_BG = rl.Color(0, 0, 0, 180)
   MUTCD_LINES = rl.Color(255, 255, 255, 100)
+  # camera sign reader (signd) status icon
+  CAM_SCANNING = rl.Color(23, 179, 99, 255)
+  CAM_TRACKING = rl.Color(40, 170, 255, 255)
+  CAM_BACKED_OFF = rl.Color(255, 165, 0, 255)
 
 
 class IconSide(StrEnum):
@@ -196,6 +203,8 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
         self._draw_pre_active_arrow(sign_rect)
       else:
         self._draw_ahead_info(sign_rect)
+      if ui_state.speed_limit_vision:
+        self._draw_vision_status(sign_rect)
 
   def _draw_sign_main(self, rect, alpha=1.0):
     speed_limit_warning_enabled = ui_state.speed_limit_mode is not None and ui_state.speed_limit_mode >= SpeedLimitMode.warning
@@ -284,6 +293,42 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
 
       f_scale = 0.6 if len(sub) < 3 else 0.475
       self._draw_text_centered(self.font_bold, sub, int(box_sz * f_scale), rl.Vector2(s_rect.x + box_sz / 2, s_rect.y + box_sz / 2), white)
+
+  def _draw_vision_status(self, sign_rect):
+    """Debug badge on the sign's bottom-left corner: is signd running, and what is it doing.
+    grey: no messages (starting or not running), green: scanning, blue: following a sign, orange: backed off because
+    the driving model dropped frames. The latest raw reading is shown to its right for a few seconds."""
+    sm = ui_state.sm
+    alive = sm.recv_frame["liveVisionSpeedLimitSP"] >= ui_state.started_frame and \
+      time.monotonic() - sm.recv_time["liveVisionSpeedLimitSP"] < VISION_STALE_TIME
+    vsl = sm["liveVisionSpeedLimitSP"]
+    if not alive:
+      color = Colors.GREY
+    elif vsl.guardLevel > 0:
+      color = Colors.CAM_BACKED_OFF
+    elif vsl.tracking:
+      color = Colors.CAM_TRACKING
+    else:
+      color = Colors.CAM_SCANNING
+
+    r = 30
+    c = rl.Vector2(sign_rect.x + r / 2, sign_rect.y + sign_rect.height - r / 2)
+    rl.draw_circle_v(c, r, Colors.SUB_BG)
+    rl.draw_ring(c, r - 4, r, 0, 360, 36, color)
+    # camera glyph: body, viewfinder bump, lens
+    body = rl.Rectangle(c.x - 15, c.y - 8, 30, 20)
+    rl.draw_rectangle_rec(rl.Rectangle(c.x - 6, c.y - 13, 12, 6), color)
+    rl.draw_rectangle_rounded(body, 0.3, 6, color)
+    rl.draw_circle_v(rl.Vector2(c.x, c.y + 2), 6, Colors.SUB_BG)
+    if alive and vsl.guardLevel == 2:  # paused: strike through
+      rl.draw_line_ex(rl.Vector2(c.x - 18, c.y + 18), rl.Vector2(c.x + 18, c.y - 18), 5, color)
+
+    if alive and 0 <= vsl.timeSinceRead < VISION_READ_SHOW_TIME:
+      txt = "END" if vsl.lastReadSign == 0 else str(vsl.lastReadSign)
+      sz = measure_text_cached(self.font_bold, txt, 36)
+      pos = rl.Vector2(c.x + r + 14, c.y - sz.y / 2)  # right of the icon: the set speed box is on the left
+      rl.draw_rectangle_rounded(rl.Rectangle(pos.x - 8, pos.y - 2, sz.x + 16, sz.y + 4), 0.4, 6, Colors.SUB_BG)
+      rl.draw_text_ex(self.font_bold, txt, pos, 36, 0, color)
 
   def _draw_ahead_info(self, sign_rect):
     source_is_map = self.speed_limit_source == SpeedLimitSource.map

@@ -494,6 +494,11 @@ struct LiveVisionSpeedLimitSP @0xcb9fd56c7057593a {
   distanceSinceSign @6 :Float32;  # m
   frameId @7 :UInt32;
   modelExecutionTime @8 :Float32;
+  # debug status, for the onroad camera icon
+  guardLevel @9 :UInt8;  # 0 normal, 1 reduced, 2 paused (signd/guard.py GuardLevel)
+  tracking @10 :Bool;  # a sign is being followed and read
+  lastReadSign @11 :UInt8;  # latest single reading, before filtering (0 = end of zone)
+  timeSinceRead @12 :Float32;  # s since that reading, -1 if none yet
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {
