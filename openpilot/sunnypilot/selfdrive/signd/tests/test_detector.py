@@ -42,7 +42,7 @@ class TestSignDetector(OpenpilotTestCase):
     dets = det.detect(np.zeros((h, w, 3), dtype=np.uint8))
     assert len(dets) == 1
     assert dets[0].value == 60
-    assert 0.8 < dets[0].confidence <= 0.9
+    assert abs(dets[0].confidence - 0.9 ** 0.5) < 0.01  # sqrt(detector score 0.9) * classifier probability ~1
 
     # box maps back inside the ROI in full-frame coordinates
     rx0, ry0, rx1, ry1 = roi_pixels('road', w, h)

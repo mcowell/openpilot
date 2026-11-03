@@ -45,6 +45,13 @@ def get_vision_speed_limit_packet(state: SignFilterState, is_metric: bool, frame
   return msg
 
 
+def wait_for_model(sm: messaging.SubMaster, frame_id: int, timeout: float = 0.045) -> None:
+  """Until modeld has published its output for frame_id (or timeout, about a frame)"""
+  deadline = time.monotonic() + timeout
+  while sm['modelV2'].frameId < frame_id and time.monotonic() < deadline:
+    sm.update(5)
+
+
 def main():
   # lowest GPU priority (KGSL: 0 highest, 15 lowest), below the models' 12 from launch_env.sh, so modeld's work
   # preempts ours instead of waiting behind an ~80 ms detector run. Must be set before tinygrad opens the GPU.
@@ -92,10 +99,14 @@ def main():
     if level != prev_level:
       cloudlog.warning(f"signd: guard {prev_level.name} -> {level.name} (modelV2.frameDropPerc {sm['modelV2'].frameDropPerc:.2f})")
 
-    # every frame goes to the reader, which decides whether to scan, read a tracked sign, or do nothing
-    t1 = time.perf_counter()
-    detections = reader.update(now, np.frombuffer(buf.data, dtype=np.uint8), buf.stride, buf.uv_offset, buf.width, buf.height, level)
-    if detections is not None:
+    # every frame goes to the reader, which picks this frame's GPU job, if any, and does its CPU work now, while modeld is
+    # busy with the same frame. The job runs once modeld has finished it: the GPU is then free until the next frame.
+    detections = None
+    job = reader.prepare(now, np.frombuffer(buf.data, dtype=np.uint8), buf.stride, buf.uv_offset, buf.width, buf.height, level)
+    if job is not None:
+      wait_for_model(sm, vipc_client.frame_id)
+      t1 = time.perf_counter()
+      detections = reader.run(job)
       exec_time = time.perf_counter() - t1
 
     yaw_rate = -sm['deviceMotion'].angularVelocityDevice.z  # device z points down

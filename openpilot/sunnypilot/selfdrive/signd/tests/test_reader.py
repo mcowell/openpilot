@@ -7,131 +7,142 @@ See the LICENSE.md file in the root directory for more details.
 import numpy as np
 
 from openpilot.common.test import OpenpilotTestCase
-from openpilot.sunnypilot.selfdrive.signd.detector import Candidate
+from openpilot.sunnypilot.selfdrive.signd.detector import Candidate, Window
 from openpilot.sunnypilot.selfdrive.signd.guard import GuardLevel
 from openpilot.sunnypilot.selfdrive.signd.reader import ReaderParams, SignReader, Track
 from openpilot.sunnypilot.selfdrive.signd.sign_filter import Detection
 
-DT = 0.05  # camera frames at 20 Hz
+DT = 0.05  # camera / driving model frames at 20 Hz
 FRAME = (np.zeros(10, np.uint8), 8, 8, 8, 8)  # never looked at by the stub
+SIGN = (100., 50., 120., 75.)
+TILES = [(0, 0, 200, 200), (200, 0, 400, 200), (0, 200, 200, 400), (200, 200, 400, 400)]
 
 
-def box4(box) -> tuple[int, int, int, int]:
-  x0, y0, x1, y1 = (int(v) for v in box)
-  return x0, y0, x1, y1
+def window(rect) -> Window:
+  return Window(np.zeros(1), 1., 0, 0, rect[0], rect[1])
 
 
 class StubDetector:
-  """Records what the reader asks for. scan() finds the sign while `visible`; refine() finds it wherever it's asked to look."""
+  """The sign is in tile 0 while `visible`. Local windows find it while `local_ok`. Records each GPU run."""
   def __init__(self, local=True, value: int | None = 50):
     self.local = object() if local else None
     self.value = value
     self.visible = True
-    self.refine_ok = True
-    self.calls: list[tuple[str, float]] = []
-    self.t = 0.
+    self.local_ok = True
+    self.runs: list[str] = []
+
+  def tiles(self, w, h):
+    return TILES
+
+  def entry_tiles(self, w, h):
+    return TILES[:1]
+
+  def prepare_tile(self, data, stride, uv_offset, w, h, rect):
+    return window(rect)
+
+  def prepare_local(self, data, stride, uv_offset, w, h, box):
+    return window((-1, -1))  # marks a local window
+
+  def run_window(self, win, w, h):
+    is_local = win.x0 == -1
+    self.runs.append('local' if is_local else f'tile{TILES.index((win.x0, win.y0, win.x0 + 200, win.y0 + 200))}')
+    found = (is_local and self.local_ok) or (not is_local and self.visible and (win.x0, win.y0) == (0, 0))
+    return np.array([[*SIGN, 0.9]]) if found else np.zeros((0, 5))
+
+  def prepare_crop(self, data, stride, uv_offset, w, h, box):
+    return np.zeros(1)
+
+  def run_classifier(self, x):
+    self.runs.append('classify')
+    return self.value, 0.9
+
+  def candidate(self, box, score, value, prob):
+    x0, y0, x1, y1 = (int(v) for v in box)
+    return Candidate((x0, y0, x1, y1), score, value, score * prob if value is not None else 0.)
 
   def scan(self, data, stride, uv_offset, w, h):
-    self.calls.append(('scan', self.t))
+    self.runs.append('scan')
     return [Candidate((100, 50, 120, 75), 0.9, self.value, 0.8)] if self.visible else []
-
-  def refine(self, data, stride, uv_offset, w, h, box):
-    self.calls.append(('read', self.t))
-    if not self.refine_ok:
-      return None
-    return Candidate(box4(box), 0.9, self.value, 0.8)
 
   def to_detection(self, c, w, h):
     return None if c.value is None else Detection(c.value, c.confidence, (0., 0., 0.01, 0.02))
 
 
-def run(reader, det, seconds, start=0., level=GuardLevel.normal):
-  out = []
-  for i in range(round(seconds / DT)):
-    det.t = start + i * DT
-    out.append(reader.update(det.t, *FRAME, level))
-  return out
+def run(reader, seconds, level=GuardLevel.normal):
+  return [reader.update(i * DT, *FRAME, level) for i in range(round(seconds / DT))]
 
 
 class TestSignReader(OpenpilotTestCase):
-  def test_scans_once_a_second_when_nothing_found(self):
+  def test_sweeps_tiles_when_nothing_found(self):
     det = StubDetector()
     det.visible = False
-    run(SignReader(det), det, 3.)
-    assert [round(t, 2) for kind, t in det.calls] == [0., 1., 2.]
-    assert all(kind == 'scan' for kind, _ in det.calls)
+    out = run(SignReader(det), 0.8)
+    # one job every 2nd frame, entry tiles (here tile 0) alternating with the full grid
+    assert det.runs == ['tile0', 'tile0', 'tile0', 'tile1', 'tile0', 'tile2', 'tile0', 'tile3']
+    assert [i for i, d in enumerate(out) if d is not None] == list(range(0, 16, 2))
 
-  def test_bursts_reads_between_scans_after_a_find(self):
+  def test_found_sign_is_classified_then_read(self):
     det = StubDetector()
-    run(SignReader(det, ReaderParams(track_time=0.9)), det, 1.)
-    reads = [t for kind, t in det.calls if kind == 'read']
-    # 4 Hz after the scan at t=0, until the next scan
-    assert [round(t, 2) for t in reads] == [0.25, 0.5, 0.75]
+    out = run(SignReader(det, ReaderParams(track_time=10.)), 1.)
+    # found in tile 0; while tracking a job runs every frame: a local read (re-finds it precisely) and its classify every
+    # 1/5 s, tiles in the free frames
+    assert det.runs[:8] == ['tile0', 'local', 'classify', 'tile0', 'tile0', 'local', 'classify', 'tile1']
+    assert det.runs.count('local') == 5 and det.runs.count('classify') == 5
+    # only classify jobs produce readings
+    readings = [d for d in out if d]
+    assert len(readings) == 5 and all(d[0].value == 50 for d in readings)
 
-  def test_track_expires(self):
+  def test_every_job_is_small(self):
     det = StubDetector()
-    run(SignReader(det, ReaderParams(scan_hz=0.1, track_time=1.)), det, 3.)
-    reads = [t for kind, t in det.calls if kind == 'read']
-    assert reads and max(reads) <= 1.
-    assert len(det.calls) == 1 + len(reads)  # nothing after the track ended, until the next scan in 10 s
-
-  def test_lost_sign_drops_track(self):
-    det = StubDetector()
-    det.refine_ok = False
-    run(SignReader(det, ReaderParams(scan_hz=0.1, max_misses=2)), det, 3.)
-    assert sum(kind == 'read' for kind, _ in det.calls) == 3  # misses 1, 2, 3 > max_misses
-
-  def test_unreadable_sign_drops_track(self):
-    # found every time but never readable (e.g. not a speed sign): must not hold the GPU for the whole track_time
-    det = StubDetector(value=None)
-    out = run(SignReader(det, ReaderParams(scan_hz=0.1, max_misses=2, track_time=5.)), det, 3.)
-    assert sum(kind == 'read' for kind, _ in det.calls) == 3
-    assert all(not d for d in out if d is not None)
-
-  def test_readings_returned_only_when_work_ran(self):
-    det = StubDetector()
-    out = run(SignReader(det), det, 1.)
-    ran = [i for i, d in enumerate(out) if d is not None]
-    assert ran == [0, 5, 10, 15]
-    assert all(d and d[0].value == 50 for d in out if d is not None)
-
-  def test_round_robin_between_tracks(self):
-    class TwoSigns(StubDetector):
-      def __init__(self):
-        super().__init__()
-        self.looked: list[int] = []
-
-      def scan(self, data, stride, uv_offset, w, h):
-        return [Candidate((100, 50, 120, 75), 0.9, 50, 0.8), Candidate((300, 50, 320, 75), 0.8, 60, 0.7)]
-
-      def refine(self, data, stride, uv_offset, w, h, box):
-        self.looked.append(int(box[0]))
-        return Candidate(box4(box), 0.9, 50, 0.8)
-
-    det = TwoSigns()
-    run(SignReader(det), det, 1.)
-    assert det.looked == [100, 300, 100]
+    run(SignReader(det), 3.)
+    assert 'scan' not in det.runs  # the long full-ROI scan only runs without a local detector
 
   def test_paused_does_nothing(self):
     det = StubDetector()
-    out = run(SignReader(det), det, 3., level=GuardLevel.paused)
-    assert det.calls == [] and all(d is None for d in out)
+    assert all(d is None for d in run(SignReader(det), 2., level=GuardLevel.paused))
+    assert det.runs == []
 
-  def test_reduced_scans_only(self):
+  def test_reduced_halves_jobs_and_doesnt_track(self):
     det = StubDetector()
-    run(SignReader(det), det, 3., level=GuardLevel.reduced)
-    assert [(kind, round(t, 2)) for kind, t in det.calls] == [('scan', 0.), ('scan', 1.), ('scan', 2.)]
+    run(SignReader(det), 1., level=GuardLevel.reduced)
+    assert 'local' not in det.runs
+    assert det.runs == ['tile0', 'tile0', 'tile0', 'tile1', 'tile0']  # one job every 4th frame, tiles only
+
+  def test_lost_sign_drops_track(self):
+    det = StubDetector()
+    det.local_ok = False
+    det.visible = False
+    reader = SignReader(det, ReaderParams(track_time=10.))
+    reader.tracks.append(Track(box=np.array(SIGN), t=0., start_t=0.))
+    run(reader, 3.)
+    assert det.runs.count('local') == 3 and not reader.tracks  # misses 1, 2, 3 > max_misses
+
+  def test_unreadable_sign_drops_track(self):
+    # found every time but never readable (e.g. a licence plate): must not keep the GPU busy for the whole track_time
+    det = StubDetector(value=None)
+    reader = SignReader(det, ReaderParams(track_time=10.))
+    out = run(reader, 2.)
+    assert all(not d for d in out if d is not None)
+    assert det.runs.count('local') <= 3
+
+  def test_classify_queue_is_bounded(self):
+    det = StubDetector()
+    reader = SignReader(det, ReaderParams(max_pending=2))
+    job = reader.prepare(0., *FRAME)
+    assert job is not None
+    for _ in range(5):
+      reader._queue(job, np.array(SIGN), 0.9, Track(np.array(SIGN), 0., 0.))
+    assert len(reader.pending) == 2
+
+  def test_without_local_detector_scans_at_2hz(self):
+    det = StubDetector(local=False)
+    run(SignReader(det), 2.)
+    assert det.runs == ['scan'] * 4
 
   def test_reduced_without_local_detector_scans_at_1hz(self):
     det = StubDetector(local=False)
-    run(SignReader(det), det, 2., level=GuardLevel.reduced)
-    assert [round(t, 2) for _, t in det.calls] == [0., 1.]
-
-  def test_without_local_detector_scans_at_2hz(self):
-    # no tracking possible: fixed full scans, as before tracking existed
-    det = StubDetector(local=False)
-    run(SignReader(det), det, 2.)
-    assert [(kind, round(t, 2)) for kind, t in det.calls] == [('scan', 0.), ('scan', 0.5), ('scan', 1.), ('scan', 1.5)]
+    run(SignReader(det), 2., level=GuardLevel.reduced)
+    assert det.runs == ['scan'] * 2
 
 
 class TestTrack(OpenpilotTestCase):

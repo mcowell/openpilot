@@ -19,6 +19,7 @@ Model contract (both ONNX, single input each, see README.md):
               output  float32 [1, len(SPEED_LIMIT_VALUES) + 2] logits: the values, then reject
                       (advisory, school zone, minimum, truck, unreadable...), then end of zone ("ENDS / FIN" tab)
 """
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,9 @@ REJECT, END = len(SPEED_LIMIT_VALUES), len(SPEED_LIMIT_VALUES) + 1
 SIGN_CLASS = 0
 NMS_IOU = 0.5
 LOCAL_SIGN_PX = 30  # target panel height in the local detector's input, px
+TILE_SCALE = 0.4  # tiles see the ROI at the scale of the full scan (416 px over the 3X road ROI): what it was trained on
+TILE_OVERLAP = 130  # ROI px; more than the largest panel, so every sign is whole in some tile
+ENTRY_Y, ENTRY_X1 = 0.6, 0.21  # entry tiles: vertical centre, and left edge of the second one, as ROI fractions
 
 # Normalized (x0, y0, x1, y1) region where roadside signs appear, per camera.
 # Right side of the road and above the horizon; signs on the left of divided highways are out of scope for v1.
@@ -231,7 +235,31 @@ class Candidate:
   box: tuple[int, int, int, int]  # x0, y0, x1, y1
   score: float  # detector score
   value: int | None
-  confidence: float  # detector score * classifier probability, 0 when rejected
+  confidence: float  # sqrt(detector score) * classifier probability, 0 when rejected
+
+
+@dataclass(frozen=True)
+class Window:
+  """A local-detector input prepared on the CPU, and how its boxes map back to ROI pixels"""
+  x: np.ndarray  # NCHW input
+  scale: float  # input pixels per ROI pixel
+  pad_x: int
+  pad_y: int
+  x0: int  # window origin, ROI pixels
+  y0: int
+
+
+def best_overlap(found: np.ndarray, box) -> np.ndarray | None:
+  """The highest-scoring of found ([N, 5]: x0, y0, x1, y1, score) that overlaps box, or None"""
+  if len(found) == 0:
+    return None
+  x0, y0, x1, y1 = box
+  ix = np.clip(np.minimum(found[:, 2], x1) - np.maximum(found[:, 0], x0), 0, None)
+  iy = np.clip(np.minimum(found[:, 3], y1) - np.maximum(found[:, 1], y0), 0, None)
+  overlap = ix * iy
+  if overlap.max() <= 0.:
+    return None
+  return found[int(np.argmax(np.where(overlap > 0., found[:, 4], -1.)))]
 
 
 class SignDetector:
@@ -284,14 +312,40 @@ class SignDetector:
     xyxy = np.clip((boxes[:, :4] - [pad_x, pad_y, pad_x, pad_y]) / scale * 2, 0, [rw, rh, rw, rh]).astype(int)
     return self._classify(data, stride, uv_offset, w, h, xyxy, boxes[:, 4])
 
-  def refine(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> Candidate | None:
-    """Re-find a tracked sign near box (x0, y0, x1, y1, ROI pixels, e.g. predicted from its motion) with the small local
-    detector, then classify it. None if the sign isn't found there."""
+  # Small GPU jobs, split into a CPU prepare (done while the GPU is busy with the driving model) and a GPU run (done in
+  # the gap after the driving model finishes a frame). Each run is ~10-15 ms on a 3X, so it fits in that gap.
+
+  def tiles(self, w: int, h: int) -> list[tuple[int, int, int, int]]:
+    """Overlapping square windows covering the ROI (ROI pixels) for the local detector at TILE_SCALE: together, a scan"""
+    rx0, ry0, rx1, ry1 = roi_pixels(self.camera, w, h)
+    rw, rh = rx1 - rx0, ry1 - ry0
+    side = min(rw, rh, int(self.local_size / TILE_SCALE)) & ~3
+    def starts(n):
+      count = max(1, math.ceil((n - side) / (side - TILE_OVERLAP)) + 1)
+      return sorted({int(round(i * (n - side) / max(1, count - 1))) & ~3 for i in range(count)})
+    return [(x, y, x + side, y + side) for y in starts(rh) for x in starts(rw)]
+
+  def entry_tiles(self, w: int, h: int) -> list[tuple[int, int, int, int]]:
+    """The tiles where signs first appear: small and far, left of the ROI near the vanishing point (on held-out drives
+    first sightings were at x 0-450, y 180-550 of the 1062x664 3X road ROI). Swept more often than the rest."""
+    rx0, ry0, rx1, ry1 = roi_pixels(self.camera, w, h)
+    rw, rh = rx1 - rx0, ry1 - ry0
+    side = min(rw, rh, int(self.local_size / TILE_SCALE)) & ~3
+    y = int(np.clip(ENTRY_Y * rh - side / 2, 0, rh - side)) & ~3
+    return [(x, y, x + side, y + side) for x in sorted({0, int(np.clip(ENTRY_X1 * rw, 0, rw - side)) & ~3})]
+
+  def prepare_tile(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, rect) -> Window:
+    rx0, ry0, _, _ = roi_pixels(self.camera, w, h)
+    x0, y0, x1, y1 = rect
+    half = nv12_to_rgb_half(data, stride, uv_offset, (rx0 + x0, ry0 + y0, rx0 + x1, ry0 + y1))
+    img, scale, pad_x, pad_y = letterbox(half, self.local_size, self.local_size)
+    return Window(to_nchw(img), scale / 2, pad_x, pad_y, x0, y0)
+
+  def prepare_local(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> Window:
+    """Window around box (ROI pixels, e.g. a track's predicted box), sized so the sign is ~LOCAL_SIGN_PX in the input"""
     rx0, ry0, rx1, ry1 = roi_pixels(self.camera, w, h)
     rw, rh = rx1 - rx0, ry1 - ry0
     x0, y0, x1, y1 = box
-    assert self.local is not None
-    # window sized so the sign is ~LOCAL_SIGN_PX in the local input: the scale the detector saw in training
     side = int(np.clip((y1 - y0) * self.local_size / LOCAL_SIGN_PX, self.local_size, min(rw, rh)))
     cx, cy = (x0 + x1) / 2, (y0 + y1 * 2) / 3  # a little low: the window includes the tabs below the panel
     wx0 = int(np.clip(cx - side / 2, 0, rw - side)) & ~1
@@ -299,36 +353,58 @@ class SignDetector:
     side &= ~1
     region = nv12_to_rgb(data, stride, uv_offset, (rx0 + wx0, ry0 + wy0, rx0 + wx0 + side, ry0 + wy0 + side))
     img, scale, pad_x, pad_y = letterbox(region, self.local_size, self.local_size)
-    boxes = decode_boxes(self.local(to_nchw(img)), self.min_score)
-    boxes = boxes[boxes[:, 5] == SIGN_CLASS]
-    if len(boxes) == 0:
-      return None
-    xyxy = (boxes[:, :4] - [pad_x, pad_y, pad_x, pad_y]) / scale + [wx0, wy0, wx0, wy0]
-    # the sign we're tracking: overlapping the prediction, best score
-    ix = np.clip(np.minimum(xyxy[:, 2], x1) - np.maximum(xyxy[:, 0], x0), 0, None)
-    iy = np.clip(np.minimum(xyxy[:, 3], y1) - np.maximum(xyxy[:, 1], y0), 0, None)
-    overlap = ix * iy / np.maximum(1., (x1 - x0) * (y1 - y0))
-    if overlap.max() <= 0.:
-      return None
-    best = int(np.argmax(np.where(overlap > 0., boxes[:, 4], -1.)))
-    best_box = np.clip(xyxy[best:best + 1], 0, [rw, rh, rw, rh]).astype(int)
-    found = self._classify(data, stride, uv_offset, w, h, best_box, boxes[best:best + 1, 4])
-    return found[0] if found else None
+    return Window(to_nchw(img), scale, pad_x, pad_y, wx0, wy0)
 
-  def _classify(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, xyxy: np.ndarray, scores: np.ndarray) -> list[Candidate]:
+  def run_window(self, win: Window, w: int, h: int) -> np.ndarray:
+    """Local detector on a prepared window: [N, 5] boxes x0, y0, x1, y1 (ROI pixels) and score"""
+    assert self.local is not None
+    rx0, ry0, rx1, ry1 = roi_pixels(self.camera, w, h)
+    boxes = decode_boxes(self.local(win.x), self.min_score)
+    boxes = boxes[boxes[:, 5] == SIGN_CLASS]
+    xyxy = (boxes[:, :4] - [win.pad_x, win.pad_y, win.pad_x, win.pad_y]) / win.scale + [win.x0, win.y0, win.x0, win.y0]
+    xyxy = np.clip(xyxy, 0, [rx1 - rx0, ry1 - ry0] * 2)
+    return np.concatenate([xyxy, boxes[:, 4:5]], axis=1)
+
+  def prepare_crop(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> np.ndarray | None:
+    """Classifier input for box (ROI pixels), at full resolution, converting only the crop's region (clipped to the ROI,
+    as in training). None if the box is too small to classify."""
     rx0, ry0, rx1, ry1 = roi_pixels(self.camera, w, h)
     rw, rh = rx1 - rx0, ry1 - ry0
-    keep = (xyxy[:, 2] - xyxy[:, 0] >= 8) & (xyxy[:, 3] - xyxy[:, 1] >= 8)
+    x0, y0, x1, y1 = (int(v) for v in box)
+    bw, bh = x1 - x0, y1 - y0
+    if bw < 8 or bh < 8:
+      return None
+    cx0, cy0 = max(0, int(x0 - CLS_MARGIN_X * bw)) & ~1, max(0, int(y0 - CLS_MARGIN_TOP * bh)) & ~1
+    cx1, cy1 = min(rw, int(x1 + CLS_MARGIN_X * bw) + 2) & ~1, min(rh, int(y1 + CLS_MARGIN_BOTTOM * bh) + 2) & ~1
+    region = nv12_to_rgb(data, stride, uv_offset, (rx0 + cx0, ry0 + cy0, rx0 + cx1, ry0 + cy1))
+    return to_nchw(classifier_crop(region, (x0 - cx0, y0 - cy0, x1 - cx0, y1 - cy0)))
+
+  def run_classifier(self, x: np.ndarray) -> tuple[int | None, float]:
+    """value (speed, 0 for end of zone, None for reject) and its probability"""
+    p = softmax(self.classifier(x))[0]
+    idx = int(p.argmax())
+    return (None if idx == REJECT else (SPEED_LIMIT_VALUES[idx] if idx < REJECT else 0)), float(p[idx])
+
+  def candidate(self, box, score: float, value: int | None, prob: float) -> Candidate:
+    """confidence = sqrt(detector score) * classifier probability: the classifier (which has a reject class) says whether
+    the sign can be read; the detector score is mostly "is this a sign", already gated by min_score, and the small local
+    detector scores lower than the full scan for the same sign, so it is weighted less."""
+    x0, y0, x1, y1 = (int(v) for v in box)
+    return Candidate((x0, y0, x1, y1), float(score), value, float(math.sqrt(score) * prob) if value is not None else 0.)
+
+  def refine(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> Candidate | None:
+    """Re-find a tracked sign near box (ROI pixels, e.g. predicted from its motion) with the local detector, then classify
+    it. None if the sign isn't found there."""
+    found = best_overlap(self.run_window(self.prepare_local(data, stride, uv_offset, w, h, box), w, h), box)
+    if found is None:
+      return None
+    x = self.prepare_crop(data, stride, uv_offset, w, h, found[:4])
+    return None if x is None else self.candidate(found[:4], found[4], *self.run_classifier(x))
+
+  def _classify(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, xyxy: np.ndarray, scores: np.ndarray) -> list[Candidate]:
     out = []
-    for (x0, y0, x1, y1), score in zip(xyxy[keep], scores[keep], strict=True):
-      # full resolution, converting only the crop's region (clipped to the ROI, as in training)
-      bw, bh = x1 - x0, y1 - y0
-      cx0, cy0 = max(0, int(x0 - CLS_MARGIN_X * bw)) & ~1, max(0, int(y0 - CLS_MARGIN_TOP * bh)) & ~1
-      cx1, cy1 = min(rw, int(x1 + CLS_MARGIN_X * bw) + 2) & ~1, min(rh, int(y1 + CLS_MARGIN_BOTTOM * bh) + 2) & ~1
-      region = nv12_to_rgb(data, stride, uv_offset, (rx0 + cx0, ry0 + cy0, rx0 + cx1, ry0 + cy1))
-      # one crop per call: tinygrad's OnnxRunner fixes dynamic dims on first use
-      p = softmax(self.classifier(to_nchw(classifier_crop(region, (x0 - cx0, y0 - cy0, x1 - cx0, y1 - cy0)))))[0]
-      idx = int(p.argmax())
-      value = None if idx == REJECT else (SPEED_LIMIT_VALUES[idx] if idx < REJECT else 0)
-      out.append(Candidate((int(x0), int(y0), int(x1), int(y1)), float(score), value, float(score * p[idx]) if value is not None else 0.))
+    for box, score in zip(xyxy, scores, strict=True):
+      x = self.prepare_crop(data, stride, uv_offset, w, h, box)
+      if x is not None:
+        out.append(self.candidate(box, score, *self.run_classifier(x)))  # one crop per call: tinygrad fixes dims
     return out
