@@ -27,8 +27,8 @@ class Detection:
 @dataclass
 class FilterParams:
   min_confidence: float = 0.6  # per-detection threshold
-  min_hits: int = 2  # agreeing detections needed to accept a value (at SIGND_RATE_HZ = 2, a sign is in view for ~4-8 frames)
-  window: float = 1.5  # s, detections older than this are dropped
+  min_hits: int = 2  # agreeing detections needed to accept a value (at SIGND_RATE_HZ = 1, a sign is in view for ~2-4 frames)
+  window: float = 2.5  # s, detections older than this are dropped (min_hits reads at SIGND_RATE_HZ must fit)
   min_area_growth: float = 1.0  # last/first box area; >= 1 means the sign is being approached, not left behind
   max_hold_time: float = 600.  # s, forget the limit after this long without a new sign
   max_hold_distance: float = 5000.  # m, forget the limit after driving this far without a new sign
