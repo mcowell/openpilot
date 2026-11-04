@@ -14,7 +14,7 @@ from openpilot.cereal import custom
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Mode as SpeedLimitMode, VisionMode
+from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Mode as SpeedLimitMode
 from openpilot.common.hardware import HARDWARE
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -29,6 +29,7 @@ SET_SPEED_NA = 255
 KM_TO_MILE = 0.621371
 VISION_STALE_TIME = 2.  # s without a signd message before its icon goes grey
 VISION_READ_SHOW_TIME = 3.  # s a raw sign reading stays beside the icon
+CAMERA_HALO_NEW_TIME = 3.  # s the camera halo stays thick after the camera changes the shown limit
 
 AssistState = custom.LongitudinalPlanSP.SpeedLimit.AssistState
 SpeedLimitSource = custom.LongitudinalPlanSP.SpeedLimit.Source
@@ -110,6 +111,7 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
     self.speed_limit_final_last = 0.0
     self.speed_limit_source = SpeedLimitSource.none
     self.speed_limit_assist_state = AssistState.disabled
+    self._camera_limit_shown: tuple[float, float] | None = None  # (limit, time) the camera's number went on the sign
 
     self.speed_limit_ahead = 0.0
     self.speed_limit_ahead_dist = 0.0
@@ -151,6 +153,11 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
       self.speed_limit_last_valid = resolver.speedLimitLastValid
       self.speed_limit_final_last = resolver.speedLimitFinalLast * self.speed_conv
       self.speed_limit_source = resolver.source
+      camera = self.speed_limit_source == SpeedLimitSource.vision and self.speed_limit_valid
+      if not camera:
+        self._camera_limit_shown = None
+      elif self._camera_limit_shown is None or self._camera_limit_shown[0] != self.speed_limit:
+        self._camera_limit_shown = (self.speed_limit, time.monotonic())
       self.speed_limit_assist_state = assist.state
 
     if sm.updated["liveMapDataSP"]:
@@ -198,6 +205,8 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
     alpha = self._pre_active_fade.alpha
 
     if ui_state.speed_limit_mode != SpeedLimitMode.off:
+      if self._camera_limit_shown is not None:
+        self._draw_camera_halo(sign_rect, time.monotonic() - self._camera_limit_shown[1])
       self._draw_sign_main(sign_rect, alpha)
       if self.speed_limit_assist_state == AssistState.preActive:
         self._draw_pre_active_arrow(sign_rect)
@@ -294,12 +303,23 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
       f_scale = 0.6 if len(sub) < 3 else 0.475
       self._draw_text_centered(self.font_bold, sub, int(box_sz * f_scale), rl.Vector2(s_rect.x + box_sz / 2, s_rect.y + box_sz / 2), white)
 
+  def _draw_camera_halo(self, sign_rect, age: float):
+    """Ring around the sign while its number came from the camera (speed limit signs) rather than the map or car:
+    thick for CAMERA_HALO_NEW_TIME after the camera changes it, then thinner for as long as it's the camera's."""
+    width = 22 if age < CAMERA_HALO_NEW_TIME else 12
+    if ui_state.is_metric:
+      center = rl.Vector2(sign_rect.x + sign_rect.width / 2, sign_rect.y + sign_rect.height / 2)
+      radius = (sign_rect.width + 18) / 2
+      rl.draw_ring(center, radius, radius + width, 0, 360, 48, Colors.CAM_TRACKING)
+    else:
+      halo = rl.Rectangle(sign_rect.x - width, sign_rect.y - width, sign_rect.width + 2 * width, sign_rect.height + 2 * width)
+      rl.draw_rectangle_rounded(halo, 0.35, 10, Colors.CAM_TRACKING)
+
   def _draw_vision_status(self, sign_rect):
     """Debug badge on the sign's bottom-left corner: is signd running, and what is it doing.
     grey: no messages (starting or not running), green: scanning, blue: following a sign, orange: backed off because
     the driving model dropped frames. The latest raw reading is shown to its right for a few seconds.
-    Filled in when the limit on the sign came from the camera (resolver source vision), hollow when it came from the
-    map/car. The dot shows the setting: P = Priority (camera over map), F = Fallback (camera only when map has none)."""
+    Whether the number on the sign is the camera's is shown by _draw_camera_halo."""
     sm = ui_state.sm
     alive = sm.recv_frame["liveVisionSpeedLimitSP"] >= ui_state.started_frame and \
       time.monotonic() - sm.recv_time["liveVisionSpeedLimitSP"] < VISION_STALE_TIME
@@ -313,8 +333,7 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
     else:
       color = Colors.CAM_SCANNING
 
-    from_camera = alive and self.speed_limit_source == SpeedLimitSource.vision
-    bg, fg = (color, Colors.BLACK) if from_camera else (Colors.SUB_BG, color)
+    bg, fg = Colors.SUB_BG, color
 
     r = 30
     c = rl.Vector2(sign_rect.x + r / 2, sign_rect.y + sign_rect.height - r / 2)
@@ -327,13 +346,6 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
     rl.draw_circle_v(rl.Vector2(c.x, c.y + 2), 6, bg)
     if alive and vsl.guardLevel == 2:  # paused: strike through
       rl.draw_line_ex(rl.Vector2(c.x - 18, c.y + 18), rl.Vector2(c.x + 18, c.y - 18), 5, fg)
-
-    # mode dot, top right of the badge
-    mode = "P" if ui_state.speed_limit_vision == VisionMode.priority else "F"
-    dc = rl.Vector2(c.x + r * 0.75, c.y - r * 0.75)
-    rl.draw_circle_v(dc, 15, Colors.BLACK)
-    rl.draw_ring(dc, 13, 15, 0, 360, 24, Colors.WHITE)
-    self._draw_text_centered(self.font_bold, mode, 22, dc, Colors.WHITE)
 
     if alive and 0 <= vsl.timeSinceRead < VISION_READ_SHOW_TIME:
       txt = "END" if vsl.lastReadSign == 0 else str(vsl.lastReadSign)
