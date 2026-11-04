@@ -231,7 +231,7 @@ def main() -> int:
     print(f'{seg_dir.name}: {cam.name}' + ('' if vehicle else ' (no vehicle state, distance/turn resets disabled)'))
 
     w, h = probe_size(cam)
-    pending: list[Detection] = []  # detections since the last timeline sample
+    pending: list[tuple[int, Detection]] = []  # (frame, detection) since the last timeline sample
     for frame, nv12 in iter_frames(cam, CAMERA_FPS if reader is not None else args.rate):
       seg_t = frame / CAMERA_FPS
       x0, y0, x1, y1 = roi_pixels(args.camera, w, h)
@@ -250,14 +250,15 @@ def main() -> int:
         dets = reader.update(t, nv12, w, w * h, w, h) or []
       else:
         dets = detector.detect_nv12(nv12, w, w * h, w, h)
-      pending += dets
+      pending += [(frame, d) for d in dets]
       state = sign_filter.update(t, dets, v_ego, yaw_rate)
       if frame % sample_every:
         continue
-      dets, pending = pending, []
+      found, pending = pending, []
+      dets = [d for _, d in found]
       truth = label_at(intervals, frame)
       timeline.append({'route': route, 'segment': seg, 'frame': frame, 't': t,
-                       'v_ego': v_ego, 'detections': [asdict(d) for d in dets],
+                       'v_ego': v_ego, 'detections': [asdict(d) | {'frame': f} for f, d in found],
                        'speed_limit': state.speed_limit, 'confidence': state.confidence, 'truth': truth})
 
       if args.video:

@@ -14,7 +14,7 @@ from openpilot.cereal import custom
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Mode as SpeedLimitMode
+from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Mode as SpeedLimitMode, VisionMode
 from openpilot.common.hardware import HARDWARE
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -297,7 +297,9 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
   def _draw_vision_status(self, sign_rect):
     """Debug badge on the sign's bottom-left corner: is signd running, and what is it doing.
     grey: no messages (starting or not running), green: scanning, blue: following a sign, orange: backed off because
-    the driving model dropped frames. The latest raw reading is shown to its right for a few seconds."""
+    the driving model dropped frames. The latest raw reading is shown to its right for a few seconds.
+    Filled in when the limit on the sign came from the camera (resolver source vision), hollow when it came from the
+    map/car. The dot shows the setting: P = Priority (camera over map), F = Fallback (camera only when map has none)."""
     sm = ui_state.sm
     alive = sm.recv_frame["liveVisionSpeedLimitSP"] >= ui_state.started_frame and \
       time.monotonic() - sm.recv_time["liveVisionSpeedLimitSP"] < VISION_STALE_TIME
@@ -311,17 +313,27 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
     else:
       color = Colors.CAM_SCANNING
 
+    from_camera = alive and self.speed_limit_source == SpeedLimitSource.vision
+    bg, fg = (color, Colors.BLACK) if from_camera else (Colors.SUB_BG, color)
+
     r = 30
     c = rl.Vector2(sign_rect.x + r / 2, sign_rect.y + sign_rect.height - r / 2)
-    rl.draw_circle_v(c, r, Colors.SUB_BG)
+    rl.draw_circle_v(c, r, bg)
     rl.draw_ring(c, r - 4, r, 0, 360, 36, color)
     # camera glyph: body, viewfinder bump, lens
     body = rl.Rectangle(c.x - 15, c.y - 8, 30, 20)
-    rl.draw_rectangle_rec(rl.Rectangle(c.x - 6, c.y - 13, 12, 6), color)
-    rl.draw_rectangle_rounded(body, 0.3, 6, color)
-    rl.draw_circle_v(rl.Vector2(c.x, c.y + 2), 6, Colors.SUB_BG)
+    rl.draw_rectangle_rec(rl.Rectangle(c.x - 6, c.y - 13, 12, 6), fg)
+    rl.draw_rectangle_rounded(body, 0.3, 6, fg)
+    rl.draw_circle_v(rl.Vector2(c.x, c.y + 2), 6, bg)
     if alive and vsl.guardLevel == 2:  # paused: strike through
-      rl.draw_line_ex(rl.Vector2(c.x - 18, c.y + 18), rl.Vector2(c.x + 18, c.y - 18), 5, color)
+      rl.draw_line_ex(rl.Vector2(c.x - 18, c.y + 18), rl.Vector2(c.x + 18, c.y - 18), 5, fg)
+
+    # mode dot, top right of the badge
+    mode = "P" if ui_state.speed_limit_vision == VisionMode.priority else "F"
+    dc = rl.Vector2(c.x + r * 0.75, c.y - r * 0.75)
+    rl.draw_circle_v(dc, 15, Colors.BLACK)
+    rl.draw_ring(dc, 13, 15, 0, 360, 24, Colors.WHITE)
+    self._draw_text_centered(self.font_bold, mode, 22, dc, Colors.WHITE)
 
     if alive and 0 <= vsl.timeSinceRead < VISION_READ_SHOW_TIME:
       txt = "END" if vsl.lastReadSign == 0 else str(vsl.lastReadSign)
