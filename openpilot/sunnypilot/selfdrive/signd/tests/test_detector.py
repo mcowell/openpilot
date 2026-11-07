@@ -178,3 +178,13 @@ class TestScore(OpenpilotTestCase):
     assert s['limits_labeled'] == 2 and s['limits_found'] == 2
     assert s['median_time_to_limit'] == 1.5
     assert s['wrong_values'] == [(80, 50), (80, 70)]
+
+  def test_cut_plate_at_roi_edge_dropped(self):
+    from openpilot.sunnypilot.selfdrive.signd.detector import not_cut_plate
+    h = 1208
+    boxes = np.array([
+      [0, 550, 120, 660],   # half a licence plate on the car ahead, cut by the ROI's left edge: dropped
+      [5, 330, 45, 390],    # real sign near the edge but high up (top 0.27): kept
+      [300, 550, 400, 660], # low but away from the edge (a car in the next lane): left to the classifier
+    ], dtype=float)
+    assert list(not_cut_plate(boxes, 0, h)) == [False, True, True]

@@ -40,6 +40,11 @@ NMS_IOU = 0.5
 LOCAL_SIGN_PX = 30  # target panel height in the local detector's input, px
 TILE_SCALE = 0.4  # tiles see the ROI at the scale of the full scan (416 px over the 3X road ROI): what it was trained on
 TILE_OVERLAP = 130  # ROI px; more than the largest panel, so every sign is whole in some tile
+# The road ROI's left edge runs through the car ahead: stopped behind it, its licence plate is cut in half there and the
+# right half (big digits on white) was read as a sign (80, 100). Boxes at that edge and low in the frame are dropped. Real
+# signs near the edge were all high (top <= 0.32 of the frame height); plates were at >= 0.45.
+PLATE_EDGE_PX = 20  # full-resolution px from the ROI's left edge
+PLATE_ZONE_Y = 0.40  # frame-height fraction; boxes whose top is below this
 ENTRY_Y, ENTRY_X1 = 0.6, 0.21  # entry tiles: vertical centre, and left edge of the second one, as ROI fractions
 
 # Normalized (x0, y0, x1, y1) region where roadside signs appear, per camera.
@@ -56,6 +61,11 @@ def roi_pixels(camera: str, w: int, h: int) -> tuple[int, int, int, int]:
   x0, y0, x1, y1 = ROIS[camera]
   # even aligned so the ROI maps onto whole NV12 chroma samples
   return int(x0 * w) & ~1, int(y0 * h) & ~1, int(x1 * w) & ~1, int(y1 * h) & ~1
+
+
+def not_cut_plate(xyxy: np.ndarray, ry0: int, h: int) -> np.ndarray:
+  """Mask of boxes (ROI px, x0 y0 x1 y1 ...) that aren't at the ROI's left edge low in the frame, i.e. the car ahead"""
+  return ~((xyxy[:, 0] <= PLATE_EDGE_PX) & ((xyxy[:, 1] + ry0) / h >= PLATE_ZONE_Y))
 
 
 def classifier_crop(img: np.ndarray, box) -> np.ndarray:
@@ -310,7 +320,8 @@ class SignDetector:
     boxes = boxes[boxes[:, 5] == SIGN_CLASS]
     # back to full-resolution ROI pixels
     xyxy = np.clip((boxes[:, :4] - [pad_x, pad_y, pad_x, pad_y]) / scale * 2, 0, [rw, rh, rw, rh]).astype(int)
-    return self._classify(data, stride, uv_offset, w, h, xyxy, boxes[:, 4])
+    keep = not_cut_plate(xyxy, ry0, h)
+    return self._classify(data, stride, uv_offset, w, h, xyxy[keep], boxes[keep, 4])
 
   # Small GPU jobs, split into a CPU prepare (done while the GPU is busy with the driving model) and a GPU run (done in
   # the gap after the driving model finishes a frame). Each run is ~10-15 ms on a 3X, so it fits in that gap.
@@ -363,7 +374,8 @@ class SignDetector:
     boxes = boxes[boxes[:, 5] == SIGN_CLASS]
     xyxy = (boxes[:, :4] - [win.pad_x, win.pad_y, win.pad_x, win.pad_y]) / win.scale + [win.x0, win.y0, win.x0, win.y0]
     xyxy = np.clip(xyxy, 0, [rx1 - rx0, ry1 - ry0] * 2)
-    return np.concatenate([xyxy, boxes[:, 4:5]], axis=1)
+    keep = not_cut_plate(xyxy, ry0, h)
+    return np.concatenate([xyxy, boxes[:, 4:5]], axis=1)[keep]
 
   def prepare_crop(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> np.ndarray | None:
     """Classifier input for box (ROI pixels), at full resolution, converting only the crop's region (clipped to the ROI,
