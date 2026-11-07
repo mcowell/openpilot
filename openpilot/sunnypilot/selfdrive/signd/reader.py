@@ -45,6 +45,8 @@ class ReaderParams:
   job_every: int = 2  # one GPU job per this many driving-model frames (20 Hz); doubled when the guard says reduced
   job_every_tracking: int = 1  # ... while a sign is being tracked: signs are often readable for only ~1 s
   track_hz: float = 5.  # local reads per second of each tracked sign (each also needs a classify job)
+  new_track_hz: float = 10.  # ... for its first new_track_time: back to back with its classify jobs. A sign seen just as
+  new_track_time: float = 0.6  # the car turns is often in view for only ~0.3 s, and two readings are needed to accept it
   track_time: float = 2.  # s, how long a found sign is followed
   max_tracks: int = 2
   max_misses: int = 2  # consecutive reads that lose the sign, or can't read it, before the track is dropped
@@ -147,7 +149,7 @@ class SignReader:
     if self.pending:
       return self.pending.pop(0)
     if level == GuardLevel.normal:
-      due = [tr for tr in self.tracks if t - tr.last_read >= 1. / p.track_hz]
+      due = [tr for tr in self.tracks if t - tr.last_read >= 1. / self._read_hz(tr, t)]
       if due:
         tr = min(due, key=lambda tr: tr.last_read)
         tr.last_read = t
@@ -159,6 +161,9 @@ class SignReader:
     self._tile += 1
     rect = entry[(n // 2) % len(entry)] if n % 2 == 0 else grid[(n // 2) % len(grid)]
     return Job('tile', t, frame, window=self.detector.prepare_tile(*frame, rect))
+
+  def _read_hz(self, tr: Track, t: float) -> float:
+    return self.params.new_track_hz if t - tr.start_t < self.params.new_track_time else self.params.track_hz
 
   def run(self, job: Job) -> list[Detection]:
     """GPU part of a job, plus bookkeeping. Returns the readings it produced (only classify and scan jobs read)."""

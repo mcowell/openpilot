@@ -23,13 +23,36 @@ class Detection:
   def area(self) -> float:
     return self.box[2] * self.box[3]
 
+  @property
+  def clipped_v(self) -> bool:
+    """box touches the top or bottom of the frame, so its height is cut off"""
+    return self.box[1] <= EDGE or self.box[1] + self.box[3] >= 1. - EDGE
+
+  @property
+  def clipped_h(self) -> bool:
+    return self.box[0] <= EDGE or self.box[0] + self.box[2] >= 1. - EDGE
+
+
+EDGE = 0.005  # normalized; a box this close to the frame edge is cut off by it
+
+
+def growth(first: Detection, last: Detection) -> float:
+  """How much a sign grew between two detections (> 1: being approached). A sign leaving the frame (often over the top
+  while passing it, or as the car turns) is cut off by the edge, so its area shrinks although it's still getting closer:
+  compare the dimension the edge doesn't cut."""
+  if first.clipped_v or last.clipped_v:
+    return last.box[2] / max(first.box[2], 1e-6) if not (first.clipped_h or last.clipped_h) else 1.
+  if first.clipped_h or last.clipped_h:
+    return last.box[3] / max(first.box[3], 1e-6)
+  return last.area / max(first.area, 1e-9)
+
 
 @dataclass
 class FilterParams:
   min_confidence: float = 0.6  # per-detection threshold
   min_hits: int = 2  # agreeing detections needed to accept a value (at SIGND_RATE_HZ = 2, a sign is often readable for only ~1 s)
   window: float = 2.5  # s, detections older than this are dropped (min_hits reads at SIGND_RATE_HZ must fit)
-  min_area_growth: float = 1.0  # last/first box area; >= 1 means the sign is being approached, not left behind
+  min_area_growth: float = 1.0  # last/first box size (growth()); >= 1 means the sign is being approached, not left behind
   max_hold_time: float = 600.  # s, forget the limit after this long without a new sign
   max_hold_distance: float = 5000.  # m, forget the limit after driving this far without a new sign
   turn_window: float = 10.  # s, window over which heading change is summed
@@ -59,13 +82,16 @@ class SignFilter:
     self._yaw.clear()
     self.state = SignFilterState()
 
-  def update(self, t: float, detections: list[Detection], v_ego: float = 0., yaw_rate: float = 0.) -> SignFilterState:
+  def update(self, t: float, detections: list[Detection], v_ego: float | None = None, yaw_rate: float = 0.) -> SignFilterState:
+    """v_ego None: unknown (e.g. offline without logs), distance resets are off"""
     dt = 0. if self._last_t is None else max(0., t - self._last_t)
     self._last_t = t
 
-    self._update_hold(t, dt, v_ego, yaw_rate)
+    self._update_hold(t, dt, v_ego or 0., yaw_rate)
 
     p = self.params
+    # no standstill rule: signs are often read while stopped beside them at an intersection. What else is in view at a
+    # standstill (a licence plate ahead at a red light) passes the growth check too, so the classifier must reject it.
     for det in detections:
       if det.confidence >= p.min_confidence:
         self._hits.append((t, det))
@@ -108,7 +134,7 @@ class SignFilter:
     for value, dets in by_value.items():
       if len(dets) < self.params.min_hits:
         continue
-      if dets[-1].area < dets[0].area * self.params.min_area_growth:
+      if growth(dets[0], dets[-1]) < self.params.min_area_growth:
         continue
       confidence = sum(d.confidence for d in dets) / len(dets)
       if best is None or confidence > best[1]:

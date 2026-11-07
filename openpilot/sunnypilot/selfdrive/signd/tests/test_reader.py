@@ -84,13 +84,20 @@ class TestSignReader(OpenpilotTestCase):
   def test_found_sign_is_classified_then_read(self):
     det = StubDetector()
     out = run(SignReader(det, ReaderParams(track_time=10.)), 1.)
-    # found in tile 0; while tracking a job runs every frame: a local read (re-finds it precisely) and its classify every
-    # 1/5 s, tiles in the free frames
-    assert det.runs[:8] == ['tile0', 'local', 'classify', 'tile0', 'tile0', 'local', 'classify', 'tile1']
-    assert det.runs.count('local') == 5 and det.runs.count('classify') == 5
+    # found in tile 0; while tracking a job runs every frame: a local read (re-finds it precisely) and its classify, back to
+    # back for the first new_track_time, then every 1/5 s with tiles in the free frames
+    assert det.runs[:16] == ['tile0', 'local', 'classify', 'local', 'classify', 'tile0', 'local', 'classify', 'tile0',
+                             'local', 'classify', 'local', 'classify', 'tile1', 'tile0', 'tile2']
+    assert det.runs.count('local') == 6 and det.runs.count('classify') == 6
     # only classify jobs produce readings
     readings = [d for d in out if d]
-    assert len(readings) == 5 and all(d[0].value == 50 for d in readings)
+    assert len(readings) == 6 and all(d[0].value == 50 for d in readings)
+
+  def test_new_sign_read_twice_quickly(self):
+    # a sign seen while turning can be in view for only ~0.3 s, and the filter needs two readings
+    det = StubDetector()
+    out = run(SignReader(det), 0.3)
+    assert len([d for d in out if d]) >= 2
 
   def test_every_job_is_small(self):
     det = StubDetector()

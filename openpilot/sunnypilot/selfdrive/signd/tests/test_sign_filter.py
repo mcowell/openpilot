@@ -56,6 +56,25 @@ class TestSignFilter(OpenpilotTestCase):
     f = SignFilter()
     assert run(f, approaching(100, 5, start_size=0.1, growth=0.8)).speed_limit == 0
 
+  def test_sign_leaving_over_the_top_accepted(self):
+    # Southwood Dr, 2026-11-07: read twice as it left the top of the frame. Cut off by the edge, its box got shorter
+    # (area shrank) while it kept getting wider: still being approached
+    f = SignFilter()
+    seq = [(0., [Detection(40, 0.75, (0.652, 0.007, 0.041, 0.093))]), (0.15, [Detection(40, 0.74, (0.660, 0.0, 0.045, 0.080))])]
+    assert run(f, seq).speed_limit == 40
+
+  def test_sign_leaving_over_the_top_and_shrinking_rejected(self):
+    f = SignFilter()
+    seq = [(0., [Detection(40, 0.9, (0.65, 0.0, 0.045, 0.08))]), (0.15, [Detection(40, 0.9, (0.66, 0.0, 0.040, 0.06))])]
+    assert run(f, seq).speed_limit == 0
+
+  def test_sign_read_while_stopped_accepted(self):
+    # stopped at an intersection beside the sign: it doesn't grow, but it's the limit (a stationary licence plate looks the
+    # same to the filter, so rejecting plates is the classifier's job)
+    f = SignFilter()
+    seq = [(i * DT, [Detection(80, 0.9, (0.75, 0.2, 0.036, 0.066))]) for i in range(3)]
+    assert run(f, seq, v_ego=0.).speed_limit == 80
+
   def test_end_of_zone_clears_limit(self):
     f = SignFilter()
     run(f, approaching(40, 3))

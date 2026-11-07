@@ -181,6 +181,7 @@ def main() -> int:
   ap.add_argument('route', type=Path)
   ap.add_argument('--camera', choices=list(CAMERA_FILES), default='road')
   ap.add_argument('--rate', type=float, default=2., help='Hz to sample the timeline at (and to run detection at with --fixed)')
+  ap.add_argument('--new-track-time', type=float, help="override ReaderParams.new_track_time (0 = no fast reads of new signs)")
   ap.add_argument('--fixed', action='store_true', help='full detection at --rate instead of signd\'s scan + burst scheduling')
   ap.add_argument('--models', type=Path, help='directory with sign_detector.onnx and sign_classifier.onnx')
   ap.add_argument('--labels', type=Path, help='labels.csv to score against')
@@ -196,7 +197,7 @@ def main() -> int:
       print('--video and --dump-rois need opencv: uv pip install opencv-python-headless', file=sys.stderr)
       return 1
   from openpilot.sunnypilot.selfdrive.signd.detector import MODELS_DIR, SignDetector, nv12_to_rgb, roi_pixels
-  from openpilot.sunnypilot.selfdrive.signd.reader import SignReader
+  from openpilot.sunnypilot.selfdrive.signd.reader import ReaderParams, SignReader
 
   segments = find_segments(args.route)
   if not segments:
@@ -217,7 +218,8 @@ def main() -> int:
     args.dump_rois.mkdir(parents=True, exist_ok=True)
 
   sign_filter = SignFilter()
-  reader = SignReader(detector) if detector is not None and not args.fixed else None
+  reader_params = ReaderParams() if args.new_track_time is None else ReaderParams(new_track_time=args.new_track_time)
+  reader = SignReader(detector, reader_params) if detector is not None and not args.fixed else None
   sample_every = max(1, round(CAMERA_FPS / args.rate))
   timeline: list[dict] = []
   for route, seg, seg_dir in segments:
@@ -241,7 +243,8 @@ def main() -> int:
         continue
 
       assert detector is not None
-      v_ego = yaw_rate = 0.
+      v_ego: float | None = None  # unknown without logs: the filter's distance resets are off
+      yaw_rate = 0.
       if vehicle is not None:
         v_ego = float(np.interp(seg_t, vehicle[0], vehicle[1]))
         yaw_rate = float(np.interp(seg_t, vehicle[0], vehicle[2]))
@@ -258,7 +261,7 @@ def main() -> int:
       dets = [d for _, d in found]
       truth = label_at(intervals, frame)
       timeline.append({'route': route, 'segment': seg, 'frame': frame, 't': t,
-                       'v_ego': v_ego, 'detections': [asdict(d) | {'frame': f} for f, d in found],
+                       'v_ego': v_ego or 0., 'detections': [asdict(d) | {'frame': f} for f, d in found],
                        'speed_limit': state.speed_limit, 'confidence': state.confidence, 'truth': truth})
 
       if args.video:
