@@ -29,6 +29,7 @@ from openpilot.sunnypilot.selfdrive.signd.reader import SignReader
 from openpilot.sunnypilot.selfdrive.signd.sign_filter import SignFilter, SignFilterState
 
 CAMERA = 'road'
+MAP_STALE_TIME = 5.  # s without liveMapDataSP before its road name is treated as unknown
 
 
 @dataclass
@@ -90,7 +91,7 @@ def main():
   sign_filter = SignFilter()
   cloudlog.warning("signd: models loaded, starting")
 
-  sm = messaging.SubMaster(['carState', 'deviceMotion', 'modelV2'])
+  sm = messaging.SubMaster(['carState', 'deviceMotion', 'modelV2', 'liveMapDataSP'])
   pm = messaging.PubMaster(['liveVisionSpeedLimitSP'])
 
   is_metric = params.get_bool("IsMetric")
@@ -128,7 +129,8 @@ def main():
         last_read = (max(detections, key=lambda d: d.confidence).value, now)
 
     yaw_rate = -sm['deviceMotion'].angularVelocityDevice.z  # device z points down
-    state = sign_filter.update(now, detections or [], sm['carState'].vEgo, yaw_rate)
+    road = sm['liveMapDataSP'].roadName if now - sm.recv_time['liveMapDataSP'] < MAP_STALE_TIME else ''
+    state = sign_filter.update(now, detections or [], sm['carState'].vEgo, yaw_rate, road)
     if now - last_publish >= 1. / SIGND_RATE_HZ:
       last_publish = now
       debug = DebugStatus(int(level), bool(reader.tracks), last_read[0] if last_read else 0, now - last_read[1] if last_read else -1.)

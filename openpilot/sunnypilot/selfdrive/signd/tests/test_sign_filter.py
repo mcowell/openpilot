@@ -22,11 +22,20 @@ def approaching(value, n, start_t=0., confidence=0.9, start_size=0.02, growth=1.
   return out
 
 
-def run(f, seq, v_ego=25., yaw_rate=0.):
+def run(f, seq, v_ego=25., yaw_rate=0., road=''):
   state = None
   for t, dets in seq:
-    state = f.update(t, dets, v_ego, yaw_rate)
+    state = f.update(t, dets, v_ego, yaw_rate, road)
   return state
+
+
+def drive(f, seconds, start_t, v_ego=30., yaw_rate=0., road=''):
+  """No signs in view for this long at 20 Hz; returns the time at the end"""
+  t = start_t
+  for _ in range(round(seconds * 20)):
+    t += 0.05
+    f.update(t, [], v_ego, yaw_rate, road)
+  return t
 
 
 class TestSignFilter(OpenpilotTestCase):
@@ -117,6 +126,77 @@ class TestSignFilter(OpenpilotTestCase):
     yaw_rate = math.radians(90.) / 4.  # 90 deg turn over 4 s
     state = run(f, [(1. + i * DT, []) for i in range(25)], v_ego=8., yaw_rate=yaw_rate)
     assert state.speed_limit == 0
+
+  def test_road_hold_outlasts_old_caps(self):
+    # Highway 416, 2026-11-08: signs 8+ km apart, limit dropped every 5 km
+    f = SignFilter()
+    assert run(f, approaching(110, 3), road='Highway 416').speed_limit == 110
+    t = drive(f, 500., 1., road='Highway 416')  # 15 km, over 8 minutes
+    assert f.state.speed_limit == 110
+    drive(f, 200., t, road='Highway 416')  # 21 km: capped
+    assert f.state.speed_limit == 0
+
+  def test_time_limit_only_without_road_name(self):
+    f = SignFilter()
+    run(f, approaching(60, 3), road='Merivale Road')
+    drive(f, 900., 1., v_ego=0.1, road='Merivale Road')  # a long jam
+    assert f.state.speed_limit == 60
+
+  def test_road_change_clears_limit(self):
+    # Robertson Road -> Baseline Road, 2026-11-08: straight on, so no turn; 80 was held for 216 s into a 70 zone
+    f = SignFilter()
+    run(f, approaching(80, 3), road='Robertson Road')
+    t = drive(f, 15., 1., road='Robertson Road')
+    assert f.state.speed_limit == 80
+    t = drive(f, 2., t, road='Baseline Road')  # 60 m on it: could be map matching at an intersection
+    assert f.state.speed_limit == 80
+    drive(f, 2., t, road='Baseline Road')
+    assert f.state.speed_limit == 0
+
+  def test_brief_other_road_name_keeps_limit(self):
+    f = SignFilter()
+    run(f, approaching(60, 3), road='Old Richmond Road')
+    t = drive(f, 15., 1., road='Old Richmond Road')
+    t = drive(f, 2., t, road='West Hunt Club Road')
+    t = drive(f, 10., t, road='Old Richmond Road')
+    drive(f, 2., t, road='West Hunt Club Road')
+    assert f.state.speed_limit == 60
+
+  def test_empty_road_name_keeps_limit(self):
+    f = SignFilter()
+    run(f, approaching(80, 3), road='Robertson Road')
+    drive(f, 60., 1., road='')
+    assert f.state.speed_limit == 80
+
+  def test_stopped_on_cross_street_name_keeps_limit(self):
+    f = SignFilter()
+    run(f, approaching(60, 3), road='Merivale Road')
+    t = drive(f, 15., 1., road='Merivale Road')
+    drive(f, 60., t, v_ego=0., road='Clyde Avenue')  # no distance on it
+    assert f.state.speed_limit == 60
+
+  def test_sign_just_before_name_change_belongs_to_new_road(self):
+    f = SignFilter()
+    run(f, approaching(40, 3), road='Baseline Road')
+    t = drive(f, 2., 1., v_ego=10., road='Baseline Road')
+    drive(f, 15., t, v_ego=10., road='Southwood Drive')
+    assert f.state.speed_limit == 40
+
+  def test_bend_on_same_road_keeps_limit(self):
+    # a corner on Greenview Avenue, 2026-11-08
+    f = SignFilter()
+    run(f, approaching(40, 3), road='Greenview Avenue')
+    drive(f, 5., 1., v_ego=8., yaw_rate=math.radians(25.), road='Greenview Avenue')
+    assert f.state.speed_limit == 40
+
+  def test_turn_onto_new_road_clears_at_once(self):
+    f = SignFilter()
+    run(f, approaching(60, 3), road='Baseline Road')
+    t = drive(f, 15., 1., road='Baseline Road')
+    t = drive(f, 4., t, v_ego=6., yaw_rate=math.radians(25.), road='Baseline Road')  # 100 degrees, name not updated yet
+    assert f.state.speed_limit == 60
+    drive(f, 0.2, t, v_ego=6., yaw_rate=math.radians(25.), road='Southwood Drive')
+    assert f.state.speed_limit == 0
 
   def test_lane_change_does_not_reset(self):
     f = SignFilter()

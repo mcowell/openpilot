@@ -6,7 +6,7 @@ Adds a third speed limit source, `vision`, next to `car` (CAN) and `map` (OSM). 
 road camera ──VisionIPC──> signd ──liveVisionSpeedLimitSP──> plannerd (SpeedLimitResolver) ──> longitudinalPlanSP ──> UI / SLA
                                   │
                    detector.py ─> sign_filter.py
-          (sign detector + value classifier)   (needs several agreeing frames; holds the value until the next sign, an end-of-zone sign, a turn, 5 km or 10 min)
+          (sign detector + value classifier)   (needs several agreeing frames; holds the value until the next sign, an end-of-zone sign, the road name changing or 20 km; without a road name, a turn, 5 km or 10 min)
 ```
 
 - **Setting:** `SpeedLimitVision` (Settings → Cruise → Speed Limit → Source).

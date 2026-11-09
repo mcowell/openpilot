@@ -53,10 +53,16 @@ class FilterParams:
   min_hits: int = 2  # agreeing detections needed to accept a value (at SIGND_RATE_HZ = 2, a sign is often readable for only ~1 s)
   window: float = 2.5  # s, detections older than this are dropped (min_hits reads at SIGND_RATE_HZ must fit)
   min_area_growth: float = 1.0  # last/first box size (growth()); >= 1 means the sign is being approached, not left behind
+  # a limit holds until the road ends: the road name, when the map knows it, says when that is. Signs can be 8+ km apart.
+  max_hold_distance_on_road: float = 20000.  # m, forget the limit after this far on one road without a new sign
+  road_change_distance: float = 100.  # m on a new road name before it counts: map matching flickers at intersections
+  road_grace_distance: float = 200.  # m; a sign read this soon before the name changes belongs to the new road
+  # without a road name (no map data), fall back on:
   max_hold_time: float = 600.  # s, forget the limit after this long without a new sign
   max_hold_distance: float = 5000.  # m, forget the limit after driving this far without a new sign
   turn_window: float = 10.  # s, window over which heading change is summed
-  turn_reset_angle: float = math.radians(60.)  # rad, a turn this sharp means we are likely on a new road
+  turn_reset_angle: float = math.radians(60.)  # rad, a turn this sharp means we are likely on a new road (with a road
+  # name: only if the name changed too, as a road can bend this much)
 
 
 @dataclass
@@ -75,19 +81,28 @@ class SignFilter:
     self._hits: deque[tuple[float, Detection]] = deque()
     self._yaw: deque[tuple[float, float]] = deque()  # (t, heading change during step)
     self._last_t: float | None = None
+    self._current_road = ''  # latest non-empty road name
+    self._road = ''  # road the held limit belongs to, '' if unknown
+    self._new_road = ''  # different road name being driven on
+    self._new_road_dist = 0.  # m driven on it
     self.state = SignFilterState()
 
   def reset(self) -> None:
     self._hits.clear()
     self._yaw.clear()
+    self._road = self._new_road = ''
+    self._new_road_dist = 0.
     self.state = SignFilterState()
 
-  def update(self, t: float, detections: list[Detection], v_ego: float | None = None, yaw_rate: float = 0.) -> SignFilterState:
-    """v_ego None: unknown (e.g. offline without logs), distance resets are off"""
+  def update(self, t: float, detections: list[Detection], v_ego: float | None = None, yaw_rate: float = 0.,
+             road: str = '') -> SignFilterState:
+    """v_ego None: unknown (e.g. offline without logs), distance resets are off.
+    road: road name from the map, '' if not known right now."""
+    self._current_road = road or self._current_road
     dt = 0. if self._last_t is None else max(0., t - self._last_t)
     self._last_t = t
 
-    self._update_hold(t, dt, v_ego or 0., yaw_rate)
+    self._update_hold(t, dt, v_ego or 0., yaw_rate, road)
 
     p = self.params
     # no standstill rule: signs are often read while stopped beside them at an intersection. What else is in view at a
@@ -103,26 +118,48 @@ class SignFilter:
       value, confidence = candidate
       self._hits.clear()
       self._yaw.clear()
+      self._road, self._new_road, self._new_road_dist = self._current_road, '', 0.
       self.state = SignFilterState(speed_limit=value, confidence=confidence)
 
     return self.state
 
-  def _update_hold(self, t: float, dt: float, v_ego: float, yaw_rate: float) -> None:
+  def _update_hold(self, t: float, dt: float, v_ego: float, yaw_rate: float, road: str) -> None:
     if self.state.speed_limit == 0:
       return
 
     p = self.params
     self.state.time_since_accept += dt
-    self.state.distance_since_accept += max(0., v_ego) * dt
+    step = max(0., v_ego) * dt
+    self.state.distance_since_accept += step
 
     self._yaw.append((t, yaw_rate * dt))
     while self._yaw and t - self._yaw[0][0] > p.turn_window:
       self._yaw.popleft()
     heading_change = abs(sum(d for _, d in self._yaw))
 
-    if (self.state.time_since_accept > p.max_hold_time or
-        self.state.distance_since_accept > p.max_hold_distance or
-        heading_change > p.turn_reset_angle):
+    turned = heading_change > p.turn_reset_angle
+    dist = self.state.distance_since_accept
+
+    if not self._road:
+      self._road = road  # the limit was accepted before the map knew the road
+      if not self._road:
+        if self.state.time_since_accept > p.max_hold_time or dist > p.max_hold_distance or turned:
+          self.reset()
+        return
+
+    if road == self._road:
+      self._new_road, self._new_road_dist = '', 0.
+    elif road:
+      if road != self._new_road:
+        self._new_road, self._new_road_dist = road, 0.
+      self._new_road_dist += step
+      if turned or self._new_road_dist >= p.road_change_distance:
+        if dist > p.road_grace_distance or turned:
+          self.reset()
+          return
+        self._road, self._new_road, self._new_road_dist = road, '', 0.  # read just before the name caught up
+
+    if dist > p.max_hold_distance_on_road:
       self.reset()
 
   def _candidate(self) -> tuple[int, float] | None:

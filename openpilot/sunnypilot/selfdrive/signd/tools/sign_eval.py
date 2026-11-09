@@ -26,6 +26,7 @@ labels.csv columns: route,segment,start_frame,end_frame,limit
 import argparse
 import csv
 import json
+from bisect import bisect_right
 import re
 import subprocess
 import sys
@@ -84,8 +85,14 @@ def iter_frames(fn: Path, rate: float):
   proc.wait()
 
 
-def load_vehicle_state(seg_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-  """(t, vEgo, yawRate) from the segment log, t in seconds from segment start. None if unavailable."""
+def road_at(roads: list[tuple[float, str]], t: float) -> str:
+  """Latest road name logged at or before t, '' if none yet"""
+  i = bisect_right(roads, t, key=lambda r: r[0])
+  return roads[i - 1][1] if i else ''
+
+
+def load_vehicle_state(seg_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[tuple[float, str]]] | None:
+  """(t, vEgo, yawRate, [(t, road name)]) from the segment log, t in seconds from segment start. None if unavailable."""
   log = next((seg_dir / n for n in ('rlog.zst', 'rlog.bz2', 'rlog', 'qlog.zst', 'qlog.bz2', 'qlog') if (seg_dir / n).exists()), None)
   if log is None:
     return None
@@ -93,21 +100,26 @@ def load_vehicle_state(seg_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarra
     from openpilot.tools.lib.logreader import LogReader
   except ImportError:
     return None
-  speed, yaw = [], []
+  speed, yaw, roads = [], [], []
   t0 = None
   for msg in LogReader(str(log)):
+    # not the log's first message: initData carries the time the route started, so only segment 0 would line up
     if t0 is None:
+      if msg.which() != 'carState':
+        continue
       t0 = msg.logMonoTime
     t = (msg.logMonoTime - t0) * 1e-9
     if msg.which() == 'carState':
       speed.append((t, msg.carState.vEgo))
     elif msg.which() == 'deviceMotion':
       yaw.append((t, -msg.deviceMotion.angularVelocityDevice.z))  # device z points down, as in signd
+    elif msg.which() == 'liveMapDataSP':
+      roads.append((t, msg.liveMapDataSP.roadName))
   if not speed:
     return None
   s = np.array(speed)
   y = np.array(yaw) if yaw else np.zeros((1, 2))
-  return s[:, 0], s[:, 1], np.interp(s[:, 0], y[:, 0], y[:, 1])
+  return s[:, 0], s[:, 1], np.interp(s[:, 0], y[:, 0], y[:, 1]), roads
 
 
 def load_labels(fn: Path) -> dict[tuple[str, int], list[tuple[int, int, int]]]:
@@ -218,6 +230,7 @@ def main() -> int:
     args.dump_rois.mkdir(parents=True, exist_ok=True)
 
   sign_filter = SignFilter()
+  filter_no_road = SignFilter()  # the hold rules without map road names, to compare
   reader_params = ReaderParams() if args.new_track_time is None else ReaderParams(new_track_time=args.new_track_time)
   reader = SignReader(detector, reader_params) if detector is not None and not args.fixed else None
   sample_every = max(1, round(CAMERA_FPS / args.rate))
@@ -245,24 +258,27 @@ def main() -> int:
       assert detector is not None
       v_ego: float | None = None  # unknown without logs: the filter's distance resets are off
       yaw_rate = 0.
+      road = ''
       if vehicle is not None:
         v_ego = float(np.interp(seg_t, vehicle[0], vehicle[1]))
         yaw_rate = float(np.interp(seg_t, vehicle[0], vehicle[2]))
+        road = road_at(vehicle[3], seg_t)
       t = seg * SEGMENT_SECONDS + seg_t
       if reader is not None:
         dets = reader.update(t, nv12, w, w * h, w, h) or []
       else:
         dets = detector.detect_nv12(nv12, w, w * h, w, h)
       pending += [(frame, d) for d in dets]
-      state = sign_filter.update(t, dets, v_ego, yaw_rate)
+      state = sign_filter.update(t, dets, v_ego, yaw_rate, road)
+      state_no_road = filter_no_road.update(t, dets, v_ego, yaw_rate)
       if frame % sample_every:
         continue
       found, pending = pending, []
       dets = [d for _, d in found]
       truth = label_at(intervals, frame)
       timeline.append({'route': route, 'segment': seg, 'frame': frame, 't': t,
-                       'v_ego': v_ego or 0., 'detections': [asdict(d) | {'frame': f} for f, d in found],
-                       'speed_limit': state.speed_limit, 'confidence': state.confidence, 'truth': truth})
+                       'v_ego': v_ego or 0., 'road': road, 'detections': [asdict(d) | {'frame': f} for f, d in found],
+                       'speed_limit': state.speed_limit, 'speed_limit_no_road': state_no_road.speed_limit, 'confidence': state.confidence, 'truth': truth})
 
       if args.video:
         img = annotate(nv12_to_rgb(nv12, w, w * h, (0, 0, w, h)), (x0, y0, x1, y1), dets, state.speed_limit, truth)
