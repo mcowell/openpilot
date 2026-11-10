@@ -12,3 +12,10 @@ eye), plates signd actually misread, and synthetic King's Highway shields, all a
 (incl. the 2026-11-04 drive): 35/36 signs read (was 33), no plate, shield or end-of-zone accepts (was one plate). A
 detector retrained with the same plates was tried and not shipped: it found more signs but read a dusk "50 AREA ENDS"
 as 50 and lost another sign.
+
+Classifier v9 (2026-11-10): retrained with signs from the 2026-11-08/09 drives (416, city, dusk), reviewed by eye.
+Yellow advisory signs, "ahead" signs (up arrow), green guide signs and route shields on those drives are trained as
+'reject'. Crops OCR could not read are no longer trained as 'reject' (v8 did, and learned to reject real dusk signs).
+Every accepted limit over all 28 drives was checked by eye: 200 correct (v7: 179), on held-out drives 58 (v7: 52) of
+64 signs found by any version; the only wrong accept is an "ahead" 80 on a Highway 416 off-ramp, which v7 also makes
+(v7 additionally accepted an "ahead" 60 and a county road shield as 15). Detector unchanged.
