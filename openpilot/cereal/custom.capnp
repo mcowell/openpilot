@@ -390,6 +390,7 @@ struct CarControlSP @0xa5cd762cd951a455 {
   leadOne @2 :LeadData;
   leadTwo @3 :LeadData;
   intelligentCruiseButtonManagement @4 :IntelligentCruiseButtonManagement;
+  speedLimitDisplay @5 :Float32;  # m/s, 0 = none; speed limit to show on car displays (e.g. VW cluster traffic sign)
 
   struct Param {
     key @0 :Text;

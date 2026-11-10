@@ -129,4 +129,9 @@ def initialize_params(params) -> list[dict[str, Any]]:
     "ToyotaTSS2Smooth",
   ])
 
+  # volkswagen
+  keys.extend([
+    "VolkswagenClusterSpeedLimit",
+  ])
+
   return [{k: params.get(k, return_default=True)} for k in keys]
