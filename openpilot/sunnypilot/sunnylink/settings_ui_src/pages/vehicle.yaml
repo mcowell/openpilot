@@ -116,3 +116,14 @@ sections:
     - type: capability
       field: toyota_tss2
       equals: true
+- id: volkswagen
+  title: Volkswagen Settings
+  description: ''
+  items:
+  - key: VolkswagenClusterSpeedLimit
+    widget: toggle
+    title: Speed Limit in Instrument Cluster (Experimental)
+    description: Show the speed limit sunnypilot is using as the traffic sign in the instrument cluster. Requires traffic
+      sign recognition (VZE) coded in the camera and instrument cluster. Applies after the car is restarted.
+    enablement:
+    - $ref: '#/macros/offroad'
