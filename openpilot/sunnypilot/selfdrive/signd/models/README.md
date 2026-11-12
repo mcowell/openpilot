@@ -19,3 +19,11 @@ Yellow advisory signs, "ahead" signs (up arrow), green guide signs and route shi
 Every accepted limit over all 28 drives was checked by eye: 200 correct (v7: 179), on held-out drives 58 (v7: 52) of
 64 signs found by any version; the only wrong accept is an "ahead" 80 on a Highway 416 off-ramp, which v7 also makes
 (v7 additionally accepted an "ahead" 60 and a county road shield as 15). Detector unchanged.
+
+Classifier v10 (2026-11-12): retrained with ~2x the Mapillary signs (Ottawa, 416/417/401 corridors; OCR-verified,
+10.8k) and synthetic signs with condition plates (times/days/school/community safety zone) and TRUCKS plates as
+'reject'. Replayed over all 29 drives with the filter's plausibility rules: 204 correct accepts graded before (v9: 200)
+plus 2 new ones checked by eye, and the same single wrong accept (the "ahead" 80 on the Highway 416 work zone). It reads
+a "MAXIMUM 40 ... ENDS" sign as end of zone where v9 accepted 40; it misses a night 80 and a 40 with plates below
+that v9 reads. Without the plausibility rules it reads county road markers as 15/45 (as v9 seeds 0 and 2 do):
+Mapillary-capped and synthetic county marker retrains did not fix that.
