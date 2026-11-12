@@ -206,3 +206,46 @@ class TestSignFilter(OpenpilotTestCase):
     run(f, left, yaw_rate=math.radians(5.))
     state = run(f, right, yaw_rate=-math.radians(5.))
     assert state.speed_limit == 110
+
+
+class TestPlausibility(OpenpilotTestCase):
+  def test_metric_rejects_values_not_multiple_of_ten(self):
+    f = SignFilter()
+    assert run(f, approaching(15, 4)).speed_limit == 0
+    assert run(f, approaching(45, 4, start_t=10.)).speed_limit == 0
+    assert run(f, approaching(40, 3, start_t=20.)).speed_limit == 40
+
+  def test_mph_allows_fives(self):
+    f = SignFilter(is_metric=False)
+    assert run(f, approaching(35, 3)).speed_limit == 35
+
+  def test_road_number_marker_rejected(self):
+    f = SignFilter(is_metric=False)
+    assert run(f, approaching(15, 4), road='County Road 15').speed_limit == 0
+    assert run(f, approaching(25, 3, start_t=10.), road='County Road 15').speed_limit == 25
+
+  def test_road_number_not_substring(self):
+    f = SignFilter()
+    assert run(f, approaching(40, 3), road='Highway 416').speed_limit == 40
+
+  def test_end_of_zone_always_plausible(self):
+    f = SignFilter()
+    run(f, approaching(40, 3), road='County Road 0')
+    assert run(f, approaching(0, 3, start_t=30.), road='County Road 0').speed_limit == 0
+
+  def test_map_disagreement_needs_more_reads(self):
+    f = SignFilter(FilterParams(min_hits_map_disagree=3))
+    seq = approaching(40, 2)
+    state = None
+    for t, dets in seq:
+      state = f.update(t, dets, 25., 0., 'Baseline Road', map_limit=60.)
+    assert state.speed_limit == 0
+    t, dets = approaching(40, 3)[2]
+    assert f.update(t, dets, 25., 0., 'Baseline Road', map_limit=60.).speed_limit == 40
+
+  def test_map_agreement_keeps_min_hits(self):
+    f = SignFilter(FilterParams(min_hits_map_disagree=3))
+    state = None
+    for t, dets in approaching(60, 2):
+      state = f.update(t, dets, 25., 0., 'Baseline Road', map_limit=60.)
+    assert state.speed_limit == 60

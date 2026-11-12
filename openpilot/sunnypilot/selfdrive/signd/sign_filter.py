@@ -9,6 +9,7 @@ Shared by the on-device daemon (signd) and the offline evaluation tool (tools/si
 so offline scores predict on-device behaviour.
 """
 import math
+import re
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -34,6 +35,18 @@ class Detection:
 
 
 EDGE = 0.005  # normalized; a box this close to the frame edge is cut off by it
+METRIC_STEP = 10  # km/h limits are posted in steps of 10 (Canada); a 15 or 45 is a misread (often a county road marker)
+ROAD_NUMBER_RE = re.compile(r'\b(\d{1,3})\b')
+
+
+def plausible(value: int, is_metric: bool, road: str) -> bool:
+  """Whether a sign reading can be a posted limit here. 0 (end of zone) always is."""
+  if value == 0:
+    return True
+  if is_metric and value % METRIC_STEP:
+    return False
+  # a route marker for the road being driven ("County Road 15" -> a "15" shield) reads like a limit sign
+  return str(value) not in ROAD_NUMBER_RE.findall(road)
 
 
 def growth(first: Detection, last: Detection) -> float:
@@ -52,6 +65,9 @@ class FilterParams:
   min_confidence: float = 0.6  # per-detection threshold
   min_hits: int = 2  # agreeing detections needed to accept a value (at SIGND_RATE_HZ = 2, a sign is often readable for only ~1 s)
   window: float = 2.5  # s, detections older than this are dropped (min_hits reads at SIGND_RATE_HZ must fit)
+  # when the map knows the limit and the sign says otherwise (work zones, school zones, or a misread), want more reads.
+  # Equal to min_hits: off
+  min_hits_map_disagree: int = 2
   min_area_growth: float = 1.0  # last/first box size (growth()); >= 1 means the sign is being approached, not left behind
   # a limit holds until the road ends: the road name, when the map knows it, says when that is. Signs can be 8+ km apart.
   max_hold_distance_on_road: float = 20000.  # m, forget the limit after this far on one road without a new sign
@@ -76,6 +92,7 @@ class SignFilterState:
 @dataclass
 class SignFilter:
   params: FilterParams = field(default_factory=FilterParams)
+  is_metric: bool = True  # sign units; signd follows the IsMetric param
 
   def __post_init__(self):
     self._hits: deque[tuple[float, Detection]] = deque()
@@ -85,6 +102,7 @@ class SignFilter:
     self._road = ''  # road the held limit belongs to, '' if unknown
     self._new_road = ''  # different road name being driven on
     self._new_road_dist = 0.  # m driven on it
+    self._map_limit = 0  # map speed limit in sign units, 0 if unknown
     self.state = SignFilterState()
 
   def reset(self) -> None:
@@ -95,10 +113,11 @@ class SignFilter:
     self.state = SignFilterState()
 
   def update(self, t: float, detections: list[Detection], v_ego: float | None = None, yaw_rate: float = 0.,
-             road: str = '') -> SignFilterState:
+             road: str = '', map_limit: float = 0.) -> SignFilterState:
     """v_ego None: unknown (e.g. offline without logs), distance resets are off.
-    road: road name from the map, '' if not known right now."""
+    road: road name from the map, '' if not known right now. map_limit: the map's limit in sign units, 0 if unknown."""
     self._current_road = road or self._current_road
+    self._map_limit = round(map_limit)
     dt = 0. if self._last_t is None else max(0., t - self._last_t)
     self._last_t = t
 
@@ -108,7 +127,7 @@ class SignFilter:
     # no standstill rule: signs are often read while stopped beside them at an intersection. What else is in view at a
     # standstill (a licence plate ahead at a red light) passes the growth check too, so the classifier must reject it.
     for det in detections:
-      if det.confidence >= p.min_confidence:
+      if det.confidence >= p.min_confidence and plausible(det.value, self.is_metric, road or self._current_road):
         self._hits.append((t, det))
     while self._hits and t - self._hits[0][0] > p.window:
       self._hits.popleft()
@@ -169,7 +188,8 @@ class SignFilter:
 
     best: tuple[int, float] | None = None
     for value, dets in by_value.items():
-      if len(dets) < self.params.min_hits:
+      disagrees = value and self._map_limit and value != self._map_limit
+      if len(dets) < (self.params.min_hits_map_disagree if disagrees else self.params.min_hits):
         continue
       if growth(dets[0], dets[-1]) < self.params.min_area_growth:
         continue

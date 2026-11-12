@@ -95,6 +95,7 @@ def main():
   pm = messaging.PubMaster(['liveVisionSpeedLimitSP'])
 
   is_metric = params.get_bool("IsMetric")
+  sign_filter.is_metric = is_metric
   last_params_update = last_publish = exec_time = 0.
   last_read: tuple[int, float] | None = None  # (value, time) of the latest single reading
   while True:
@@ -109,7 +110,7 @@ def main():
       new_is_metric = params.get_bool("IsMetric")
       if new_is_metric != is_metric:
         sign_filter.reset()  # held value is in the old units
-      is_metric = new_is_metric
+      is_metric = sign_filter.is_metric = new_is_metric
 
     prev_level = guard.level
     level = guard.update(now, sm['modelV2'].frameDropPerc)
@@ -129,8 +130,11 @@ def main():
         last_read = (max(detections, key=lambda d: d.confidence).value, now)
 
     yaw_rate = -sm['deviceMotion'].angularVelocityDevice.z  # device z points down
-    road = sm['liveMapDataSP'].roadName if now - sm.recv_time['liveMapDataSP'] < MAP_STALE_TIME else ''
-    state = sign_filter.update(now, detections or [], sm['carState'].vEgo, yaw_rate, road)
+    map_data = sm['liveMapDataSP']
+    map_fresh = now - sm.recv_time['liveMapDataSP'] < MAP_STALE_TIME
+    road = map_data.roadName if map_fresh else ''
+    map_limit = map_data.speedLimit * (CV.MS_TO_KPH if is_metric else CV.MS_TO_MPH) if map_fresh and map_data.speedLimitValid else 0.
+    state = sign_filter.update(now, detections or [], sm['carState'].vEgo, yaw_rate, road, map_limit)
     if now - last_publish >= 1. / SIGND_RATE_HZ:
       last_publish = now
       debug = DebugStatus(int(level), bool(reader.tracks), last_read[0] if last_read else 0, now - last_read[1] if last_read else -1.)
