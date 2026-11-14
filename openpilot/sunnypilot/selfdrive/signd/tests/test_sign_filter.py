@@ -249,3 +249,43 @@ class TestPlausibility(OpenpilotTestCase):
     for t, dets in approaching(60, 2):
       state = f.update(t, dets, 25., 0., 'Baseline Road', map_limit=60.)
     assert state.speed_limit == 60
+
+
+class TestOffRoadAndMapAgree(OpenpilotTestCase):
+  def test_turn_into_parking_lot_clears_limit(self):
+    f = SignFilter()
+    run(f, approaching(60, 3), road='Greenbank Road')
+    t = drive(f, 5., 1., v_ego=15., road='Greenbank Road')
+    # right turn into a lot: ~90 deg over 3 s, then no road name
+    t = drive(f, 3., t, v_ego=5., yaw_rate=-math.radians(30), road='')
+    t = drive(f, 3., t, v_ego=5., road='')
+    assert f.state.speed_limit == 0
+
+  def test_name_dropout_without_turn_keeps_limit(self):
+    f = SignFilter()
+    run(f, approaching(60, 3), road='Greenbank Road')
+    t = drive(f, 10., 1., v_ego=15., road='')
+    drive(f, 2., t, v_ego=15., road='Greenbank Road')
+    assert f.state.speed_limit == 60
+
+  def test_short_dropout_while_turning_keeps_limit(self):
+    f = SignFilter()
+    run(f, approaching(60, 3), road='Greenbank Road')
+    t = drive(f, 1., 1., v_ego=5., yaw_rate=-math.radians(45), road='')  # 5 m without a name
+    t = drive(f, 1., t, v_ego=5., yaw_rate=-math.radians(45), road='Greenbank Road')
+    assert f.state.speed_limit == 60
+
+  def test_single_read_matching_map_accepted(self):
+    f = SignFilter()
+    t, dets = approaching(80, 1)[0]
+    assert f.update(t, dets, 20., 0., 'Woodroffe Avenue', map_limit=80.).speed_limit == 80
+
+  def test_single_read_against_map_not_accepted(self):
+    f = SignFilter()
+    t, dets = approaching(40, 1)[0]
+    assert f.update(t, dets, 20., 0., 'Woodroffe Avenue', map_limit=80.).speed_limit == 0
+
+  def test_single_read_without_map_not_accepted(self):
+    f = SignFilter()
+    t, dets = approaching(40, 1)[0]
+    assert f.update(t, dets, 20., 0., 'Southwood Drive').speed_limit == 0

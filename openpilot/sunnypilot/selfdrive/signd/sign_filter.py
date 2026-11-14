@@ -68,11 +68,16 @@ class FilterParams:
   # when the map knows the limit and the sign says otherwise (work zones, school zones, or a misread), want more reads.
   # Equal to min_hits: off
   min_hits_map_disagree: int = 2
+  # a sign that agrees with the map needs only this many reads: at signd's rate, a sign passed at speed or just after a
+  # turn is often read once. Accepting it can't show anything the map doesn't already say.
+  min_hits_map_agree: int = 1
   min_area_growth: float = 1.0  # last/first box size (growth()); >= 1 means the sign is being approached, not left behind
   # a limit holds until the road ends: the road name, when the map knows it, says when that is. Signs can be 8+ km apart.
   max_hold_distance_on_road: float = 20000.  # m, forget the limit after this far on one road without a new sign
   road_change_distance: float = 100.  # m on a new road name before it counts: map matching flickers at intersections
   road_grace_distance: float = 200.  # m; a sign read this soon before the name changes belongs to the new road
+  # turning off the mapped road (into a parking lot or driveway): the name goes empty instead of changing
+  off_road_distance: float = 15.  # m driven with no road name, after a sharp turn, before the limit is dropped
   # without a road name (no map data), fall back on:
   max_hold_time: float = 600.  # s, forget the limit after this long without a new sign
   max_hold_distance: float = 5000.  # m, forget the limit after driving this far without a new sign
@@ -102,6 +107,7 @@ class SignFilter:
     self._road = ''  # road the held limit belongs to, '' if unknown
     self._new_road = ''  # different road name being driven on
     self._new_road_dist = 0.  # m driven on it
+    self._off_road_dist = 0.  # m driven with no road name since the held road
     self._map_limit = 0  # map speed limit in sign units, 0 if unknown
     self.state = SignFilterState()
 
@@ -109,7 +115,7 @@ class SignFilter:
     self._hits.clear()
     self._yaw.clear()
     self._road = self._new_road = ''
-    self._new_road_dist = 0.
+    self._new_road_dist = self._off_road_dist = 0.
     self.state = SignFilterState()
 
   def update(self, t: float, detections: list[Detection], v_ego: float | None = None, yaw_rate: float = 0.,
@@ -138,6 +144,7 @@ class SignFilter:
       self._hits.clear()
       self._yaw.clear()
       self._road, self._new_road, self._new_road_dist = self._current_road, '', 0.
+      self._off_road_dist = 0.
       self.state = SignFilterState(speed_limit=value, confidence=confidence)
 
     return self.state
@@ -166,6 +173,14 @@ class SignFilter:
           self.reset()
         return
 
+    if not road:
+      self._off_road_dist += step
+      if turned and self._off_road_dist >= p.off_road_distance:
+        self.reset()
+        return
+    else:
+      self._off_road_dist = 0.
+
     if road == self._road:
       self._new_road, self._new_road_dist = '', 0.
     elif road:
@@ -188,8 +203,11 @@ class SignFilter:
 
     best: tuple[int, float] | None = None
     for value, dets in by_value.items():
-      disagrees = value and self._map_limit and value != self._map_limit
-      if len(dets) < (self.params.min_hits_map_disagree if disagrees else self.params.min_hits):
+      if value and self._map_limit:
+        need = self.params.min_hits_map_agree if value == self._map_limit else self.params.min_hits_map_disagree
+      else:
+        need = self.params.min_hits
+      if len(dets) < need:
         continue
       if growth(dets[0], dets[-1]) < self.params.min_area_growth:
         continue
