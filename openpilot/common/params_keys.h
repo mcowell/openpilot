@@ -291,6 +291,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SpeedLimitValueOffset", {PERSISTENT | BACKUP, INT, "0"}},
     {"SpeedLimitVision", {PERSISTENT | BACKUP, INT, "0"}},
     {"SpeedLimitSignStyle", {PERSISTENT | BACKUP, INT, "0"}},
+    {"CloseLeadStop", {PERSISTENT | BACKUP, BOOL, "1"}},
 
     // Smart Cruise Control
     {"MapTargetVelocities", {CLEAR_ON_ONROAD_TRANSITION, STRING}},

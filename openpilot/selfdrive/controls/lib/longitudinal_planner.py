@@ -118,6 +118,9 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
+    # sunnypilot: stop instead of creeping up to a stopped lead at walking pace
+    self.output_should_stop |= self.close_lead_stop.update(sm['selfdriveState'].enabled, v_ego, sm['radarState'].leadOne,
+                                                           self.output_a_target)
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
 

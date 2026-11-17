@@ -63,6 +63,12 @@ class CruiseLayout(Widget):
                      "Eases off in curves and when sunnypilot slows or stops. Never goes past your set speed, and lead-car following still comes first."),
       param="AccelBoostSP")
 
+    self.close_lead_stop_toggle = toggle_item_sp(
+      title=tr("Stop Behind Stopped Car"),
+      description=tr("When crawling up to a stopped car at walking pace, ask for a full stop instead of creeping " +
+                     "closer. Lets go as soon as the car ahead moves off."),
+      param="CloseLeadStop")
+
     self.custom_acc_toggle = toggle_item_sp(
       title=tr("Custom ACC Speed Increments"),
       description="",
@@ -93,6 +99,7 @@ class CruiseLayout(Widget):
       self.scc_v_toggle,
       self.scc_m_toggle,
       self.accel_boost_toggle,
+      self.close_lead_stop_toggle,
       self.custom_acc_toggle,
       self.custom_acc_short_increment,
       self.custom_acc_long_increment,
@@ -144,6 +151,7 @@ class CruiseLayout(Widget):
           self.icbm_toggle.show_description(True)
 
       self.accel_boost_toggle.action_item.set_enabled(has_long)
+      self.close_lead_stop_toggle.action_item.set_enabled(has_long)
 
       if has_long or has_icbm:
         self.custom_acc_toggle.action_item.set_enabled(((has_long and not ui_state.CP.pcmCruise) or has_icbm) and ui_state.is_offroad())
@@ -161,6 +169,7 @@ class CruiseLayout(Widget):
       has_icbm = has_long = False
       self.icbm_toggle.action_item.set_enabled(False)
       self.accel_boost_toggle.action_item.set_enabled(False)
+      self.close_lead_stop_toggle.action_item.set_enabled(False)
       self.icbm_toggle.set_description(tr(ONROAD_ONLY_DESCRIPTION))
 
     show_custom_acc_desc = False

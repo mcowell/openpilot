@@ -36,6 +36,12 @@ sections:
     description: "Adds a small push on top of sunnypilot's own acceleration, stronger in Aggressive and gentler in Relaxed. Eases off in curves and when sunnypilot slows or stops. Never goes past your set speed, and lead-car following still comes first."
     enablement:
     - $ref: '#/macros/longitudinal'
+  - key: CloseLeadStop
+    widget: toggle
+    title: Stop Behind Stopped Car
+    description: When crawling up to a stopped car at walking pace, ask for a full stop instead of creeping closer. Lets go as soon as the car ahead moves off.
+    enablement:
+    - $ref: '#/macros/longitudinal'
   - key: IntelligentCruiseButtonManagement
     widget: toggle
     title: Intelligent Cruise Button Management (ICBM) (Alpha)

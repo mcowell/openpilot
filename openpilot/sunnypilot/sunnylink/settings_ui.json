@@ -634,6 +634,19 @@
               ]
             },
             {
+              "key": "CloseLeadStop",
+              "widget": "toggle",
+              "title": "Stop Behind Stopped Car",
+              "description": "When crawling up to a stopped car at walking pace, ask for a full stop instead of creeping closer. Lets go as soon as the car ahead moves off.",
+              "enablement": [
+                {
+                  "type": "capability",
+                  "field": "has_longitudinal_control",
+                  "equals": true
+                }
+              ]
+            },
+            {
               "key": "IntelligentCruiseButtonManagement",
               "widget": "toggle",
               "title": "Intelligent Cruise Button Management (ICBM) (Alpha)",
