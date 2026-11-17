@@ -40,6 +40,7 @@ class Colors:
   WHITE = rl.WHITE
   BLACK = rl.BLACK
   RED = rl.Color(235, 32, 32, 255)
+  OVERSPEED = rl.Color(176, 48, 48, 255)  # over-speed number: a softer, darker red than the sign's ring
   GREY = rl.Color(145, 155, 149, 255)
   DARK_GREY = rl.Color(77, 77, 77, 255)
   SUB_BG = rl.Color(0, 0, 0, 180)
@@ -215,7 +216,7 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
 
     if ui_state.speed_limit_mode != SpeedLimitMode.off:
       if self._camera_limit_shown is not None:
-        self._draw_camera_halo(sign_rect, time.monotonic() - self._camera_limit_shown[1])
+        self._draw_camera_halo(sign_rect, time.monotonic() - self._camera_limit_shown[1], alpha)
       self._draw_sign_main(sign_rect, alpha)
       if self.speed_limit_assist_state == AssistState.preActive:
         self._draw_pre_active_arrow(sign_rect)
@@ -237,7 +238,7 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
 
     txt_color = Colors.BLACK
     if speed_limit_warning_enabled and is_overspeed:
-      txt_color = Colors.RED
+      txt_color = Colors.OVERSPEED
     elif not self.speed_limit_valid:
       txt_color = Colors.GREY
 
@@ -350,17 +351,19 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
       f_scale = 0.6 if len(sub) < 3 else 0.475
       self._draw_text_centered(self.font_bold, sub, int(box_sz * f_scale), rl.Vector2(s_rect.x + box_sz / 2, s_rect.y + box_sz / 2), white)
 
-  def _draw_camera_halo(self, sign_rect, age: float):
+  def _draw_camera_halo(self, sign_rect, age: float, alpha: float = 1.0):
     """Ring around the sign while its number came from the camera (speed limit signs) rather than the map or car:
-    thick for CAMERA_HALO_NEW_TIME after the camera changes it, then thinner for as long as it's the camera's."""
+    thick for CAMERA_HALO_NEW_TIME after the camera changes it, then thinner for as long as it's the camera's.
+    Fades with the sign (alpha) while Speed Limit Assist pulses it, or the halo would flash on its own."""
     width = 22 if age < CAMERA_HALO_NEW_TIME else 12
+    color = rl.color_alpha(Colors.CAM_TRACKING, alpha)
     if self._sign_shape() == SignShape.vienna:
       center = rl.Vector2(sign_rect.x + sign_rect.width / 2, sign_rect.y + sign_rect.height / 2)
       radius = (sign_rect.width + 18) / 2
-      rl.draw_ring(center, radius, radius + width, 0, 360, 48, Colors.CAM_TRACKING)
+      rl.draw_ring(center, radius, radius + width, 0, 360, 48, color)
     else:
       halo = rl.Rectangle(sign_rect.x - width, sign_rect.y - width, sign_rect.width + 2 * width, sign_rect.height + 2 * width)
-      rl.draw_rectangle_rounded(halo, 0.35, 10, Colors.CAM_TRACKING)
+      rl.draw_rectangle_rounded(halo, 0.35, 10, color)
 
   def _draw_vision_status(self, sign_rect):
     """Debug badge on the sign's bottom-left corner: is signd running, and what is it doing.
