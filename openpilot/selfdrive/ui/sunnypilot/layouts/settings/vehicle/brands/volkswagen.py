@@ -14,6 +14,10 @@ DESCRIPTIONS = {
     'Show the speed limit sunnypilot is using as the traffic sign in the instrument cluster. ' +
     'Requires traffic sign recognition (VZE) coded in the camera and instrument cluster. Applies after the car is restarted.'
   ),
+  'cluster_no_passing': tr_noop(
+    'Also show the camera\'s own no-passing sign (from its map data) next to the speed limit on the cluster\'s ' +
+    'Traffic signs page. Applies after the car is restarted.'
+  ),
 }
 
 
@@ -29,8 +33,17 @@ class VolkswagenSettings(BrandSettings):
       enabled=lambda: ui_state.is_offroad(),
     )
 
+    self.cluster_no_passing = toggle_item_sp(
+      lambda: tr("No-Passing Sign in Instrument Cluster (Experimental)"),
+      description=lambda: tr(DESCRIPTIONS["cluster_no_passing"]),
+      initial_state=ui_state.params.get_bool("VolkswagenClusterNoPassing"),
+      callback=lambda state: ui_state.params.put_bool("VolkswagenClusterNoPassing", state),
+      enabled=lambda: ui_state.is_offroad() and ui_state.params.get_bool("VolkswagenClusterSpeedLimit"),
+    )
+
     self.items = [
       self.cluster_speed_limit,
+      self.cluster_no_passing,
     ]
 
   def update_settings(self):

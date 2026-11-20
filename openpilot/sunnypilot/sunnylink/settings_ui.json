@@ -2452,6 +2452,22 @@
               "type": "offroad_only"
             }
           ]
+        },
+        {
+          "key": "VolkswagenClusterNoPassing",
+          "widget": "toggle",
+          "title": "No-Passing Sign in Instrument Cluster (Experimental)",
+          "description": "Also show the camera's own no-passing sign (from its map data) next to the speed limit on the cluster's Traffic signs page. Applies after the car is restarted.",
+          "enablement": [
+            {
+              "type": "offroad_only"
+            },
+            {
+              "type": "param",
+              "key": "VolkswagenClusterSpeedLimit",
+              "equals": true
+            }
+          ]
         }
       ]
     }

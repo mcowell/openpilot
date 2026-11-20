@@ -127,3 +127,13 @@ sections:
       sign recognition (VZE) coded in the camera and instrument cluster. Applies after the car is restarted.
     enablement:
     - $ref: '#/macros/offroad'
+  - key: VolkswagenClusterNoPassing
+    widget: toggle
+    title: No-Passing Sign in Instrument Cluster (Experimental)
+    description: Also show the camera's own no-passing sign (from its map data) next to the speed limit on the cluster's
+      Traffic signs page. Applies after the car is restarted.
+    enablement:
+    - $ref: '#/macros/offroad'
+    - type: param
+      key: VolkswagenClusterSpeedLimit
+      equals: true
