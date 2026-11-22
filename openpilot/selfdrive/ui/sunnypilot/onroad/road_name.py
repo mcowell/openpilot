@@ -4,18 +4,33 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+import unicodedata
+
 import pyray as rl
 
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.system.ui.lib.application import gui_app, FontWeight
+from openpilot.system.ui.lib.application import gui_app, FontWeight, font_fallback
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
+
+
+def displayable_text(text: str, font: rl.Font) -> str:
+  """Replace letters the loaded font has no glyph for (raylib would draw '?') with their unaccented base letter."""
+  missing = rl.get_glyph_index(font, ord('?'))
+  out = []
+  for ch in text:
+    if ord(ch) > 126 and rl.get_glyph_index(font, ord(ch)) == missing:
+      base = ''.join(c for c in unicodedata.normalize('NFKD', ch) if not unicodedata.combining(c))
+      ch = base if base and all(rl.get_glyph_index(font, ord(c)) != missing for c in base) else ch
+    out.append(ch)
+  return ''.join(out)
 
 
 class RoadNameRenderer(Widget):
   def __init__(self):
     super().__init__()
     self.road_name = ""
+    self._raw_road_name = ""
     self.is_metric = False
     self.font_demi = gui_app.font(FontWeight.SEMI_BOLD)
 
@@ -28,7 +43,9 @@ class RoadNameRenderer(Widget):
 
     if sm.updated["liveMapDataSP"]:
       lmd = sm["liveMapDataSP"]
-      self.road_name = lmd.roadName
+      if lmd.roadName != self._raw_road_name:
+        self._raw_road_name = lmd.roadName
+        self.road_name = displayable_text(lmd.roadName, font_fallback(self.font_demi))
 
   def _render(self, rect: rl.Rectangle):
     if not self.road_name or not ui_state.road_name_toggle:

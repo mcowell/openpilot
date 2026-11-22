@@ -95,6 +95,8 @@ FONT_SCALE = 1.242 if BIG_UI else 1.16
 ASSETS_DIR = files("openpilot.selfdrive").joinpath("assets")
 FONT_DIR = ASSETS_DIR.joinpath("fonts")
 EXTRA_FONT_CHARS = "–‑✓×°§•X⚙✕◀▶✔⌫⇧␣○●↳çêüñ–‑✓×°§•€£¥"
+# accented letters in Canadian road names (French, and macron vowels as in Kichi Zībī Mīkan) that no translation loads
+EXTRA_FONT_CHARS += "āēīōūĀĒĪŌŪàâäçéèêëîïôöùûüÿœæÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸŒÆ"
 NOTO_FONTS = {
   "ja": "NotoSansCJKjp-Regular.otf",
   "ko": "NotoSansCJKkr-Regular.otf",
