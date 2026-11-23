@@ -3,6 +3,9 @@
 - `sign_detector.onnx`: YOLO11n single-class speed limit sign detector at 416x416, trained with Ultralytics (AGPL-3.0).
   Training data includes Mapillary imagery (CC BY-SA 4.0). Not upstream-clean; to be replaced by a clean detector.
 - `sign_detector_local.onnx`: the same detector weights exported at 160x160, for re-finding a tracked sign.
+- `school_classifier.onnx` (optional): school zone check on 40x60 crops of the area above a speed sign (none / school
+  pentagon), trained on Mapillary school zone photos (CC BY-SA 4.0, eye-checked) shrunk to 3X sizes, and negatives above
+  ordinary speed signs from Mapillary and own drives.
 - `sign_classifier.onnx`: value classifier on 64x96 panel+tab crops (10..130 km/h step 5, reject, end of zone), trained on synthetic signs,
   own drives and Mapillary crops (CC BY-SA 4.0).
 
@@ -27,3 +30,9 @@ plus 2 new ones checked by eye, and the same single wrong accept (the "ahead" 80
 a "MAXIMUM 40 ... ENDS" sign as end of zone where v9 accepted 40; it misses a night 80 and a 40 with plates below
 that v9 reads. Without the plausibility rules it reads county road markers as 15/45 (as v9 seeds 0 and 2 do):
 Mapillary-capped and synthetic county marker retrains did not fix that.
+
+School check v1 (2026-11-23): own drives (never trained on) 15/15 school sign crops found, 0 false; Mapillary held-out
+129/129 found, 10/563 false (a yellow curve + advisory plate, dark night photos). The filter needs 2 school readings of
+the held limit's value (p >= 0.6) within 4 s. Replayed over the two school drives (Greenbank 50, 4a 40): the plate went on
+at each school sign and off ~500 m later.
+

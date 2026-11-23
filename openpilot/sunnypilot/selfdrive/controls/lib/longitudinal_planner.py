@@ -118,6 +118,7 @@ class LongitudinalPlannerSP:
     resolver.speedLimitOffset = float(self.resolver.speed_limit_offset)
     resolver.distToSpeedLimit = float(self.resolver.distance)
     resolver.source = self.resolver.source
+    resolver.schoolZone = self.resolver.school_zone
     assist = speedLimit.assist
     assist.state = self.sla.state
     assist.enabled = self.sla.is_enabled

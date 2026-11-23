@@ -19,6 +19,7 @@ class Detection:
   value: int  # number printed on the sign, in sign units (km/h or mph)
   confidence: float  # 0..1, product of detector and classifier confidence
   box: tuple[float, float, float, float]  # x, y, w, h, normalized to the full frame
+  school: float = 0.  # probability of a school zone pentagon on the sign
 
   @property
   def area(self) -> float:
@@ -84,6 +85,14 @@ class FilterParams:
   turn_window: float = 10.  # s, window over which heading change is summed
   turn_reset_angle: float = math.radians(60.)  # rad, a turn this sharp means we are likely on a new road (with a road
   # name: only if the name changed too, as a road can bend this much)
+  # school zone plate (pentagon above the MAXIMUM sign): shown with the limit it is mounted on. Ontario posts no end of
+  # school zone sign, so the plate goes when another limit is accepted, the road changes (the limit is dropped), or after
+  # school_hold_distance without another school sign.
+  school_min_prob: float = 0.6  # per-reading school probability
+  school_min_confidence: float = 0.3  # the reading's value confidence (min_confidence for the limit itself)
+  school_min_hits: int = 2  # school readings of the held limit's value within school_window
+  school_window: float = 4.  # s
+  school_hold_distance: float = 500.  # m since the last school reading
 
 
 @dataclass
@@ -92,6 +101,8 @@ class SignFilterState:
   confidence: float = 0.
   time_since_accept: float = 0.
   distance_since_accept: float = 0.
+  school_zone: bool = False  # the held limit is a school zone limit
+  distance_since_school: float = 0.  # m since the last school reading (while school_zone)
 
 
 @dataclass
@@ -101,6 +112,7 @@ class SignFilter:
 
   def __post_init__(self):
     self._hits: deque[tuple[float, Detection]] = deque()
+    self._school_hits: deque[tuple[float, int]] = deque()  # (t, value) of readings with a school pentagon
     self._yaw: deque[tuple[float, float]] = deque()  # (t, heading change during step)
     self._last_t: float | None = None
     self._current_road = ''  # latest non-empty road name
@@ -113,6 +125,7 @@ class SignFilter:
 
   def reset(self) -> None:
     self._hits.clear()
+    self._school_hits.clear()
     self._yaw.clear()
     self._road = self._new_road = ''
     self._new_road_dist = self._off_road_dist = 0.
@@ -132,11 +145,21 @@ class SignFilter:
     p = self.params
     # no standstill rule: signs are often read while stopped beside them at an intersection. What else is in view at a
     # standstill (a licence plate ahead at a red light) passes the growth check too, so the classifier must reject it.
+    new_school = False
     for det in detections:
-      if det.confidence >= p.min_confidence and plausible(det.value, self.is_metric, road or self._current_road):
+      if not plausible(det.value, self.is_metric, road or self._current_road):
+        continue
+      if det.confidence >= p.min_confidence:
         self._hits.append((t, det))
+      # a school reading only needs its value to match the limit accepted from the confident readings: it can't change
+      # the limit, so a less confident read of the same sign (often the far, first sightings) still counts
+      if det.value and det.school >= p.school_min_prob and det.confidence >= p.school_min_confidence:
+        self._school_hits.append((t, det.value))
+        new_school = True
     while self._hits and t - self._hits[0][0] > p.window:
       self._hits.popleft()
+    while self._school_hits and t - self._school_hits[0][0] > p.school_window:
+      self._school_hits.popleft()
 
     candidate = self._candidate()
     if candidate is not None:
@@ -145,8 +168,17 @@ class SignFilter:
       self._yaw.clear()
       self._road, self._new_road, self._new_road_dist = self._current_road, '', 0.
       self._off_road_dist = 0.
-      self.state = SignFilterState(speed_limit=value, confidence=confidence)
+      # the same limit read again (often the same sign, or a repeater) keeps its school plate; another limit drops it
+      same = value == self.state.speed_limit
+      self.state = SignFilterState(speed_limit=value, confidence=confidence,
+                                   school_zone=same and self.state.school_zone,
+                                   distance_since_school=self.state.distance_since_school if same else 0.)
 
+    # checked on a new school reading or a newly accepted limit, so the hold distance counts from the last school reading
+    limit = self.state.speed_limit
+    if (new_school or candidate is not None) and limit and sum(v == limit for _, v in self._school_hits) >= p.school_min_hits:
+      self.state.school_zone = True
+      self.state.distance_since_school = 0.
     return self.state
 
   def _update_hold(self, t: float, dt: float, v_ego: float, yaw_rate: float, road: str) -> None:
@@ -157,6 +189,10 @@ class SignFilter:
     self.state.time_since_accept += dt
     step = max(0., v_ego) * dt
     self.state.distance_since_accept += step
+    if self.state.school_zone:
+      self.state.distance_since_school += step
+      if self.state.distance_since_school > p.school_hold_distance:
+        self.state.school_zone = False
 
     self._yaw.append((t, yaw_rate * dt))
     while self._yaw and t - self._yaw[0][0] > p.turn_window:

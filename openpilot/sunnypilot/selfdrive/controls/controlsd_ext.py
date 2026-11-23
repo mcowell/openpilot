@@ -107,6 +107,7 @@ class ControlsExt(ModelStateBase):
     # Resolved speed limit (posted value, no offset) for car displays, e.g. VW cluster traffic sign
     resolver = sm['longitudinalPlanSP'].speedLimit.resolver
     CC_SP.speedLimitDisplay = float(resolver.speedLimit) if resolver.speedLimitValid else 0.
+    CC_SP.speedLimitSchoolZone = resolver.speedLimitValid and resolver.schoolZone
 
     return CC_SP
 

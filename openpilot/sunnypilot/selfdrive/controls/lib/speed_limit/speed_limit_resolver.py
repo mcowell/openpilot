@@ -62,6 +62,8 @@ class SpeedLimitResolver:
       self.params
     )
     self.source = SpeedLimitSource.none
+    self.school_zone = False  # the resolved limit is the camera's and it is a school zone limit
+    self._vision_school_zone = False
     for source in ALL_SOURCES:
       self._reset_limit_sources(source)
 
@@ -124,6 +126,7 @@ class SpeedLimitResolver:
 
   def _get_from_vision(self, sm: messaging.SubMaster) -> None:
     self._reset_limit_sources(SpeedLimitSource.vision)
+    self._vision_school_zone = False
     if VisionMode(self.vision_mode) == VisionMode.off:
       return
 
@@ -134,6 +137,7 @@ class SpeedLimitResolver:
     vision_data = sm['liveVisionSpeedLimitSP']
 
     self.limit_solutions[SpeedLimitSource.vision] = vision_data.speedLimit if vision_data.speedLimitValid else 0.
+    self._vision_school_zone = vision_data.speedLimitValid and vision_data.schoolZone
     self.distance_solutions[SpeedLimitSource.vision] = 0.
 
   def _get_from_map_data(self, sm: messaging.SubMaster) -> None:
@@ -214,6 +218,7 @@ class SpeedLimitResolver:
     self.update_params()
 
     self.speed_limit, self.distance, self.source = self._resolve_limit_sources(sm)
+    self.school_zone = self.source == SpeedLimitSource.vision and self._vision_school_zone
     self.speed_limit_offset = self._get_speed_limit_offset()
 
     self.update_speed_limit_states()

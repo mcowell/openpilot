@@ -18,6 +18,9 @@ Model contract (both ONNX, single input each, see README.md):
                       area below it where tabs (AREA, BEGINS, ENDS) hang
               output  float32 [1, len(SPEED_LIMIT_VALUES) + 2] logits: the values, then reject
                       (advisory, school zone, minimum, truck, unreadable...), then end of zone ("ENDS / FIN" tab)
+  school (optional):
+              input   float32 [1, 3, SCH_H, SCH_W], RGB in 0..1: see school_region(), the area just above a speed sign
+              output  float32 [1, 2] logits: none, school (fluorescent yellow-green school zone pentagon on the sign)
 """
 import math
 import os
@@ -35,6 +38,11 @@ CLS_W, CLS_H = 64, 96
 # classifier crop around the detected panel box, in panel widths/heights: room for the tabs below
 CLS_MARGIN_X, CLS_MARGIN_TOP, CLS_MARGIN_BOTTOM = 0.5, 0.2, 1.2
 REJECT, END = len(SPEED_LIMIT_VALUES), len(SPEED_LIMIT_VALUES) + 1
+# school check crop around the panel box, in box WIDTHS: the school pentagon is as wide as the MAXIMUM panel and sits right
+# on top of it. Close up the detector boxes the panel and the pentagon is above the box; far away it often boxes pentagon
+# and panel together and the pentagon is the top of the box. This region covers both. Must match the training crops.
+SCH_W, SCH_H = 40, 60
+SCH_X, SCH_TOP, SCH_BOTTOM = 0.3, 1.3, 1.1
 SIGN_CLASS = 0
 NMS_IOU = 0.5
 LOCAL_SIGN_PX = 30  # target panel height in the local detector's input, px
@@ -79,6 +87,45 @@ def classifier_crop(img: np.ndarray, box) -> np.ndarray:
   sx0, sy0, sx1, sy1 = max(0, cx0), max(0, cy0), min(iw, cx1), min(ih, cy1)
   out[sy0 - cy0:sy1 - cy0, sx0 - cx0:sx1 - cx0] = img[sy0:sy1, sx0:sx1]
   return resize(out, CLS_W, CLS_H)
+
+
+def school_region(box, w: int, h: int) -> tuple[int, int, int, int] | None:
+  """Frame region (x0, y0, x1, y1, even aligned, inside the frame) for the school check above box (x0, y0, x1, y1, full
+  frame px), and None if the region is mostly outside the frame"""
+  x0, y0, x1, y1 = box
+  bw = x1 - x0
+  rx0, ry0, rx1, ry1 = x0 - SCH_X * bw, y0 - SCH_TOP * bw, x1 + SCH_X * bw, y0 + SCH_BOTTOM * bw
+  cx0, cy0 = max(0, int(rx0)) & ~1, max(0, int(ry0)) & ~1
+  cx1, cy1 = min(w, int(rx1) + 2) & ~1, min(h, int(ry1) + 2) & ~1
+  if (cx1 - cx0) * (cy1 - cy0) < 0.5 * (rx1 - rx0) * (ry1 - ry0):
+    return None
+  return cx0, cy0, cx1, cy1
+
+
+def school_crop(region_rgb: np.ndarray, region, box) -> np.ndarray:
+  """SCH_H x SCH_W crop for the school check: the area above box, cut from region_rgb (the frame's school_region(),
+  converted to RGB) with the parts outside the frame grey, as in training"""
+  x0, y0, x1, y1 = box
+  bw = x1 - x0
+  ex0, ey0 = int(round(x0 - SCH_X * bw)), int(round(y0 - SCH_TOP * bw))
+  ex1, ey1 = int(round(x1 + SCH_X * bw)), int(round(y0 + SCH_BOTTOM * bw))
+  out = np.full((max(1, ey1 - ey0), max(1, ex1 - ex0), 3), 114, dtype=np.uint8)
+  gx0, gy0 = region[0], region[1]
+  sx0, sy0 = max(ex0, gx0), max(ey0, gy0)
+  sx1, sy1 = min(ex1, gx0 + region_rgb.shape[1]), min(ey1, gy0 + region_rgb.shape[0])
+  if sx1 > sx0 and sy1 > sy0:
+    out[sy0 - ey0:sy1 - ey0, sx0 - ex0:sx1 - ex0] = region_rgb[sy0 - gy0:sy1 - gy0, sx0 - gx0:sx1 - gx0]
+  return resize(area_downscale(out, SCH_W, SCH_H), SCH_W, SCH_H)
+
+
+def area_downscale(img: np.ndarray, w: int, h: int) -> np.ndarray:
+  """Box-average by the largest whole factor that keeps img at least w x h, so the bilinear resize after it doesn't
+  skip pixels (the training crops were downscaled with antialiasing)"""
+  k = min(img.shape[0] // h, img.shape[1] // w)
+  if k < 2:
+    return img
+  hh, ww = img.shape[0] // k * k, img.shape[1] // k * k
+  return img[:hh, :ww].reshape(hh // k, k, ww // k, k, 3).mean(axis=(1, 3)).astype(np.uint8)
 
 
 def softmax(x: np.ndarray) -> np.ndarray:
@@ -246,6 +293,7 @@ class Candidate:
   score: float  # detector score
   value: int | None
   confidence: float  # sqrt(detector score) * classifier probability, 0 when rejected
+  school: float = 0.  # probability of a school zone pentagon on the sign (speed values only, 0 without the school model)
 
 
 @dataclass(frozen=True)
@@ -284,6 +332,9 @@ class SignDetector:
     has_local = any((models_dir / f'sign_detector_local{ext}').exists() for ext in ('_tinygrad.pkl', '.onnx'))
     self.local = load_model(models_dir, 'sign_detector_local') if has_local else None
     self.local_size = int(self.local.input_shape[-1]) if self.local is not None else 0
+    # optional school zone check on speed signs
+    has_school = any((models_dir / f'school_classifier{ext}').exists() for ext in ('_tinygrad.pkl', '.onnx'))
+    self.school = load_model(models_dir, 'school_classifier') if has_school else None
 
   @staticmethod
   def available(models_dir: Path = MODELS_DIR, compiled: bool | None = None) -> bool:
@@ -309,7 +360,7 @@ class SignDetector:
     x0, y0, x1, y1 = c.box
     box = (float((rx0 + x0) / w), float((ry0 + y0) / h), float((x1 - x0) / w), float((y1 - y0) / h))
     # an end-of-zone sign is reported as value 0: once confirmed, the filter drops the held limit
-    return Detection(c.value, c.confidence, box)
+    return Detection(c.value, c.confidence, box, c.school)
 
   def scan(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int) -> list[Candidate]:
     """Full detector over the ROI (half resolution, letterboxed), then the classifier on each box"""
@@ -391,18 +442,36 @@ class SignDetector:
     region = nv12_to_rgb(data, stride, uv_offset, (rx0 + cx0, ry0 + cy0, rx0 + cx1, ry0 + cy1))
     return to_nchw(classifier_crop(region, (x0 - cx0, y0 - cy0, x1 - cx0, y1 - cy0)))
 
+  def prepare_school(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> np.ndarray | None:
+    """School check input for box (ROI pixels), None without the school model or when the area above is off the frame"""
+    if self.school is None:
+      return None
+    rx0, ry0, _, _ = roi_pixels(self.camera, w, h)
+    fbox = (box[0] + rx0, box[1] + ry0, box[2] + rx0, box[3] + ry0)
+    region = school_region(fbox, w, h)
+    if region is None:
+      return None
+    return to_nchw(school_crop(nv12_to_rgb(data, stride, uv_offset, region), region, fbox))
+
+  def run_school(self, x: np.ndarray | None) -> float:
+    """Probability of a school zone pentagon, 0 when x is None"""
+    if x is None or self.school is None:
+      return 0.
+    return float(softmax(self.school(x))[0, 1])
+
   def run_classifier(self, x: np.ndarray) -> tuple[int | None, float]:
     """value (speed, 0 for end of zone, None for reject) and its probability"""
     p = softmax(self.classifier(x))[0]
     idx = int(p.argmax())
     return (None if idx == REJECT else (SPEED_LIMIT_VALUES[idx] if idx < REJECT else 0)), float(p[idx])
 
-  def candidate(self, box, score: float, value: int | None, prob: float) -> Candidate:
+  def candidate(self, box, score: float, value: int | None, prob: float, school: float = 0.) -> Candidate:
     """confidence = sqrt(detector score) * classifier probability: the classifier (which has a reject class) says whether
     the sign can be read; the detector score is mostly "is this a sign", already gated by min_score, and the small local
     detector scores lower than the full scan for the same sign, so it is weighted less."""
     x0, y0, x1, y1 = (int(v) for v in box)
-    return Candidate((x0, y0, x1, y1), float(score), value, float(math.sqrt(score) * prob) if value is not None else 0.)
+    return Candidate((x0, y0, x1, y1), float(score), value, float(math.sqrt(score) * prob) if value is not None else 0.,
+                     school if value else 0.)
 
   def refine(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> Candidate | None:
     """Re-find a tracked sign near box (ROI pixels, e.g. predicted from its motion) with the local detector, then classify
@@ -411,12 +480,18 @@ class SignDetector:
     if found is None:
       return None
     x = self.prepare_crop(data, stride, uv_offset, w, h, found[:4])
-    return None if x is None else self.candidate(found[:4], found[4], *self.run_classifier(x))
+    if x is None:
+      return None
+    value, prob = self.run_classifier(x)
+    school = self.run_school(self.prepare_school(data, stride, uv_offset, w, h, found[:4])) if value else 0.
+    return self.candidate(found[:4], found[4], value, prob, school)
 
   def _classify(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, xyxy: np.ndarray, scores: np.ndarray) -> list[Candidate]:
     out = []
     for box, score in zip(xyxy, scores, strict=True):
       x = self.prepare_crop(data, stride, uv_offset, w, h, box)
       if x is not None:
-        out.append(self.candidate(box, score, *self.run_classifier(x)))  # one crop per call: tinygrad fixes dims
+        value, prob = self.run_classifier(x)  # one crop per call: tinygrad fixes dims
+        school = self.run_school(self.prepare_school(data, stride, uv_offset, w, h, box)) if value else 0.
+        out.append(self.candidate(box, score, value, prob, school))
     return out

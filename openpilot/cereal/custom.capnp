@@ -275,6 +275,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
       speedLimitFinalLast @6 :Float32;
       speedLimitValid @7 :Bool;
       speedLimitLastValid @8 :Bool;
+      schoolZone @9 :Bool;  # the limit is the camera's and is a school zone limit (liveVisionSpeedLimitSP.schoolZone)
     }
 
     struct Assist {
@@ -391,6 +392,7 @@ struct CarControlSP @0xa5cd762cd951a455 {
   leadTwo @3 :LeadData;
   intelligentCruiseButtonManagement @4 :IntelligentCruiseButtonManagement;
   speedLimitDisplay @5 :Float32;  # m/s, 0 = none; speed limit to show on car displays (e.g. VW cluster traffic sign)
+  speedLimitSchoolZone @6 :Bool;  # that limit is a school zone limit (from the camera), for a school plate on car displays
 
   struct Param {
     key @0 :Text;
@@ -500,6 +502,7 @@ struct LiveVisionSpeedLimitSP @0xcb9fd56c7057593a {
   tracking @10 :Bool;  # a sign is being followed and read
   lastReadSign @11 :UInt8;  # latest single reading, before filtering (0 = end of zone)
   timeSinceRead @12 :Float32;  # s since that reading, -1 if none yet
+  schoolZone @13 :Bool;  # the held limit is a school zone limit (school zone pentagon read on the sign)
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {

@@ -12,12 +12,12 @@ from openpilot.sunnypilot.selfdrive.signd.sign_filter import Detection, FilterPa
 DT = 0.2
 
 
-def approaching(value, n, start_t=0., confidence=0.9, start_size=0.02, growth=1.15):
+def approaching(value, n, start_t=0., confidence=0.9, start_size=0.02, growth=1.15, school=0.):
   """n detections of one sign growing in the frame, as when driving towards it"""
   out = []
   size = start_size
   for i in range(n):
-    out.append((start_t + i * DT, [Detection(value, confidence, (0.7, 0.4, size, size * 1.2))]))
+    out.append((start_t + i * DT, [Detection(value, confidence, (0.7, 0.4, size, size * 1.2), school)]))
     size *= growth
   return out
 
@@ -206,6 +206,75 @@ class TestSignFilter(OpenpilotTestCase):
     run(f, left, yaw_rate=math.radians(5.))
     state = run(f, right, yaw_rate=-math.radians(5.))
     assert state.speed_limit == 110
+
+
+class TestSchoolZone(OpenpilotTestCase):
+  def test_school_sign_sets_plate(self):
+    f = SignFilter()
+    state = run(f, approaching(40, 4, school=0.9))
+    assert state.speed_limit == 40 and state.school_zone
+
+  def test_plain_sign_no_plate(self):
+    state = run(SignFilter(), approaching(40, 4, school=0.1))
+    assert state.speed_limit == 40 and not state.school_zone
+
+  def test_single_school_reading_not_enough(self):
+    seq = approaching(40, 4, school=0.1)
+    seq[1] = (seq[1][0], [Detection(40, 0.9, seq[1][1][0].box, 0.95)])
+    assert not run(SignFilter(), seq).school_zone
+
+  def test_less_confident_school_readings_count(self):
+    # far first sightings: the value is read with low confidence but the pentagon is clear
+    f = SignFilter()
+    seq = [(t, [Detection(40, 0.4, d[0].box, 0.9)]) for t, d in approaching(40, 2)] + approaching(40, 2, start_t=0.4, school=0.1)
+    state = run(f, seq)
+    assert state.speed_limit == 40 and state.school_zone
+
+  def test_plate_needs_matching_value(self):
+    # school readings of another value (a different sign in view) don't put the plate on the held limit
+    f = SignFilter()
+    run(f, approaching(60, 4))
+    t = drive(f, 2., 1.)
+    state = run(f, [(t + i * DT, [Detection(40, 0.3, (0.7, 0.4, 0.02, 0.024), 0.9)]) for i in range(3)])
+    assert state.speed_limit == 60 and not state.school_zone
+
+  def test_new_limit_clears_plate(self):
+    f = SignFilter()
+    run(f, approaching(40, 4, school=0.9))
+    t = drive(f, 5., 1., v_ego=10.)
+    state = run(f, approaching(60, 4, start_t=t))
+    assert state.speed_limit == 60 and not state.school_zone
+
+  def test_same_limit_keeps_plate(self):
+    # the same sign read again up close, where the pentagon has left the crop
+    f = SignFilter()
+    run(f, approaching(40, 4, school=0.9))
+    t = drive(f, 3., 1., v_ego=10.)
+    state = run(f, approaching(40, 4, start_t=t, school=0.1))
+    assert state.speed_limit == 40 and state.school_zone
+
+  def test_plate_drops_after_distance(self):
+    f = SignFilter()
+    run(f, approaching(40, 4, school=0.9))
+    t = drive(f, 44., 1., v_ego=11.)  # 484 m
+    assert f.state.school_zone
+    drive(f, 2., t, v_ego=11.)  # 506 m
+    assert f.state.speed_limit == 40 and not f.state.school_zone
+
+  def test_another_school_sign_restarts_distance(self):
+    f = SignFilter()
+    run(f, approaching(40, 4, school=0.9))
+    t = drive(f, 40., 1., v_ego=11.)
+    run(f, approaching(40, 4, start_t=t, school=0.9))
+    drive(f, 20., t + 1., v_ego=11.)  # 220 m past the second sign
+    assert f.state.school_zone
+
+  def test_reset_clears_plate(self):
+    f = SignFilter()
+    run(f, approaching(40, 4, school=0.9), road='Greenbank Road')
+    t = drive(f, 10., 1., road='Greenbank Road')  # past the grace distance, so the next name is a new road
+    drive(f, 10., t, road='Baseline Road')
+    assert f.state.speed_limit == 0 and not f.state.school_zone
 
 
 class TestPlausibility(OpenpilotTestCase):

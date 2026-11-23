@@ -8,7 +8,8 @@ Schedules signd's GPU work as small jobs, each short enough (~10-15 ms on a 3X) 
 finishes a frame, so signd never holds the GPU when modeld needs it:
   tile:     the local detector on one tile of the ROI; a sweep over all tiles is a scan, and finds new signs
   local:    the local detector in a window around a tracked sign's predicted position, to re-find it
-  classify: the classifier on a crop cut (on the CPU) from the frame where a sign was found
+  classify: the classifier on a crop cut (on the CPU) from the frame where a sign was found, and on speed signs the school
+            zone check on the area above it
 Signs are often readable for only ~1 s, so a found sign is read several times a second for a couple of seconds.
 prepare() picks the next job and does its CPU work (while the GPU is busy with modeld); run() does the GPU part.
 Shared by signd and tools/sign_eval.py so offline results match the car.
@@ -35,8 +36,10 @@ class Detector(Protocol):
   def prepare_local(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> Window: ...
   def run_window(self, win: Window, w: int, h: int) -> np.ndarray: ...
   def prepare_crop(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> np.ndarray | None: ...
+  def prepare_school(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> np.ndarray | None: ...
   def run_classifier(self, x: np.ndarray) -> tuple[int | None, float]: ...
-  def candidate(self, box, score: float, value: int | None, prob: float) -> Candidate: ...
+  def run_school(self, x: np.ndarray | None) -> float: ...
+  def candidate(self, box, score: float, value: int | None, prob: float, school: float = 0.) -> Candidate: ...
   def to_detection(self, c: Candidate, w: int, h: int) -> Detection | None: ...
 
 
@@ -98,6 +101,7 @@ class Job:
   box: np.ndarray | None = None  # local: predicted box; classify: box the crop was cut around
   score: float = 0.
   crop: np.ndarray | None = None
+  school_crop: np.ndarray | None = None  # area above the sign, for the school check (classify jobs)
   track: Track | None = None
 
 
@@ -175,7 +179,10 @@ class SignReader:
 
     if job.kind == 'classify':
       assert job.crop is not None and job.box is not None
-      c = self.detector.candidate(job.box, job.score, *self.detector.run_classifier(job.crop))
+      value, prob = self.detector.run_classifier(job.crop)
+      # the school check is tiny (40x60): it runs in the same GPU gap, and only on signs read as a speed
+      school = self.detector.run_school(job.school_crop) if value else 0.
+      c = self.detector.candidate(job.box, job.score, value, prob, school)
       if job.track is not None:
         # unreadable counts against the track, so a non-sign (e.g. a licence plate) doesn't keep the GPU busy
         job.track.misses = 0 if c.value is not None else job.track.misses + 1
@@ -209,5 +216,6 @@ class SignReader:
     crop = self.detector.prepare_crop(*job.frame, box)
     if crop is None:
       return
-    self.pending.append(Job('classify', job.t, job.frame, box=box, score=score, crop=crop, track=track))
+    school_crop = self.detector.prepare_school(*job.frame, box)
+    self.pending.append(Job('classify', job.t, job.frame, box=box, score=score, crop=crop, school_crop=school_crop, track=track))
     del self.pending[:-self.params.max_pending]

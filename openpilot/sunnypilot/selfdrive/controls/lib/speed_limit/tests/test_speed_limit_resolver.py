@@ -49,6 +49,7 @@ def setup_sm_mock(mocker, vision_alive=True):
   live_vision = create_mock({
     'speedLimit': vision_limit,
     'speedLimitValid': True,
+    'schoolZone': False,
   }, mocker)
   gps_data = create_mock({
     'unixTimestampMillis': time.monotonic() * 1e3,
@@ -174,6 +175,19 @@ class TestSpeedLimitResolverVision(OpenpilotTestCase):
     resolver.update(20, sm_mock)
     assert resolver.source == SpeedLimitSource.vision
     assert resolver.speed_limit == sm_mock['liveVisionSpeedLimitSP'].speedLimit
+
+  def test_school_zone_only_with_vision_source(self, resolver_class, mocker):
+    resolver = resolver_class()
+    resolver.policy = Policy.map_data_only
+    resolver.vision_mode = VisionMode.priority
+    sm_mock = setup_sm_mock(mocker)
+    sm_mock['liveVisionSpeedLimitSP'].schoolZone = True
+    resolver.update(20, sm_mock)
+    assert resolver.source == SpeedLimitSource.vision and resolver.school_zone
+
+    resolver.vision_mode = VisionMode.off  # the map's limit is shown: no school plate
+    resolver.update(20, sm_mock)
+    assert resolver.source != SpeedLimitSource.vision and not resolver.school_zone
 
   @parameterized.expand([(p,) for p in Policy if p != Policy.combined], names=["policy"])
   def test_vision_fallback(self, resolver_class, policy, mocker):

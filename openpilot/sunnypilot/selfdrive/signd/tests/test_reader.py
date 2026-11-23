@@ -24,9 +24,11 @@ def window(rect) -> Window:
 
 class StubDetector:
   """The sign is in tile 0 while `visible`. Local windows find it while `local_ok`. Records each GPU run."""
-  def __init__(self, local=True, value: int | None = 50):
+  def __init__(self, local=True, value: int | None = 50, school: float = 0.):
     self.local = object() if local else None
     self.value = value
+    self.school = school
+    self.school_runs = 0  # part of a classify job, so not in runs
     self.visible = True
     self.local_ok = True
     self.runs: list[str] = []
@@ -52,20 +54,27 @@ class StubDetector:
   def prepare_crop(self, data, stride, uv_offset, w, h, box):
     return np.zeros(1)
 
+  def prepare_school(self, data, stride, uv_offset, w, h, box):
+    return np.ones(1)
+
   def run_classifier(self, x):
     self.runs.append('classify')
     return self.value, 0.9
 
-  def candidate(self, box, score, value, prob):
+  def run_school(self, x):
+    self.school_runs += 1
+    return self.school
+
+  def candidate(self, box, score, value, prob, school=0.):
     x0, y0, x1, y1 = (int(v) for v in box)
-    return Candidate((x0, y0, x1, y1), score, value, score * prob if value is not None else 0.)
+    return Candidate((x0, y0, x1, y1), score, value, score * prob if value is not None else 0., school)
 
   def scan(self, data, stride, uv_offset, w, h):
     self.runs.append('scan')
     return [Candidate((100, 50, 120, 75), 0.9, self.value, 0.8)] if self.visible else []
 
   def to_detection(self, c, w, h):
-    return None if c.value is None else Detection(c.value, c.confidence, (0., 0., 0.01, 0.02))
+    return None if c.value is None else Detection(c.value, c.confidence, (0., 0., 0.01, 0.02), c.school)
 
 
 def run(reader, seconds, level=GuardLevel.normal):
@@ -92,6 +101,21 @@ class TestSignReader(OpenpilotTestCase):
     # only classify jobs produce readings
     readings = [d for d in out if d]
     assert len(readings) == 6 and all(d[0].value == 50 for d in readings)
+
+  def test_school_check_in_classify_job(self):
+    # speed signs get the school check in the same job; its probability travels with the reading
+    det = StubDetector(school=0.9)
+    out = run(SignReader(det, ReaderParams(track_time=10.)), 1.)
+    readings = [d[0] for d in out if d]
+    assert readings and all(d.school == 0.9 for d in readings)
+    assert det.school_runs == det.runs.count('classify')
+
+  def test_no_school_check_on_unreadable_or_end(self):
+    for value in (None, 0):
+      det = StubDetector(value=value, school=0.9)
+      out = run(SignReader(det, ReaderParams(track_time=10.)), 1.)
+      assert det.school_runs == 0
+      assert all(d.school == 0. for r in out if r for d in r)
 
   def test_new_sign_read_twice_quickly(self):
     # a sign seen while turning can be in view for only ~0.3 s, and the filter needs two readings

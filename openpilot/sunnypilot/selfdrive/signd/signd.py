@@ -51,6 +51,7 @@ def get_vision_speed_limit_packet(state: SignFilterState, is_metric: bool, frame
   vsl.confidence = state.confidence
   vsl.timeSinceSign = state.time_since_accept
   vsl.distanceSinceSign = state.distance_since_accept
+  vsl.schoolZone = state.school_zone
   vsl.frameId = frame_id
   vsl.modelExecutionTime = exec_time
   if debug is not None:

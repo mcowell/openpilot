@@ -188,3 +188,24 @@ class TestScore(OpenpilotTestCase):
       [300, 550, 400, 660], # low but away from the edge (a car in the next lane): left to the classifier
     ], dtype=float)
     assert list(not_cut_plate(boxes, 0, h)) == [False, True, True]
+
+
+class TestSchoolCrop:
+  def test_region_is_above_the_panel(self):
+    from openpilot.sunnypilot.selfdrive.signd.detector import school_region
+    x0, y0, x1, y1 = school_region((1000, 300, 1040, 350), 1928, 1208)
+    assert x0 <= 1000 - 12 and x1 >= 1040 + 12  # 0.3 box widths each side
+    assert y0 <= 300 - 52 and y1 >= 300 + 44  # 1.3 widths above the top, 1.1 below it
+    assert all(v % 2 == 0 for v in (x0, y0, x1, y1))
+
+  def test_region_off_frame_is_none(self):
+    from openpilot.sunnypilot.selfdrive.signd.detector import school_region
+    assert school_region((1500, 0, 1580, 100), 1928, 1208) is None  # the area above is mostly off the top
+
+  def test_crop_size_and_grey_outside(self):
+    from openpilot.sunnypilot.selfdrive.signd.detector import SCH_H, SCH_W, school_crop
+    box = (100, 10, 140, 60)  # area above starts at y = 10 - 52, partly off the frame
+    region = (88, 0, 152, 54)
+    crop = school_crop(np.full((54, 64, 3), 200, np.uint8), region, box)
+    assert crop.shape == (SCH_H, SCH_W, 3)
+    assert crop[0, SCH_W // 2, 0] == 114 and crop[-1, SCH_W // 2, 0] == 200

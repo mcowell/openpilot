@@ -49,6 +49,7 @@ class Colors:
   CAM_SCANNING = rl.Color(23, 179, 99, 255)
   CAM_TRACKING = rl.Color(40, 170, 255, 255)
   CAM_BACKED_OFF = rl.Color(255, 165, 0, 255)
+  SCHOOL = rl.Color(198, 230, 0, 255)  # fluorescent yellow-green, as school zone signs
 
 
 SIGN_STYLE_CANADA = 1  # SpeedLimitSignStyle param: 0 auto, 1 Canadian sign for km/h
@@ -122,6 +123,7 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
     self.speed_limit_source = SpeedLimitSource.none
     self.speed_limit_assist_state = AssistState.disabled
     self._camera_limit_shown: tuple[float, float] | None = None  # (limit, time) the camera's number went on the sign
+    self.school_zone = False  # the shown limit is the camera's and it read a school zone pentagon on that sign
 
     self.speed_limit_ahead = 0.0
     self.speed_limit_ahead_dist = 0.0
@@ -169,6 +171,7 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
       elif self._camera_limit_shown is None or self._camera_limit_shown[0] != self.speed_limit:
         self._camera_limit_shown = (self.speed_limit, time.monotonic())
       self.speed_limit_assist_state = assist.state
+      self.school_zone = camera and resolver.schoolZone
 
     if sm.updated["liveMapDataSP"]:
       lmd = sm["liveMapDataSP"]
@@ -222,6 +225,8 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
         self._draw_pre_active_arrow(sign_rect)
       else:
         self._draw_ahead_info(sign_rect)
+      if self.school_zone:
+        self._draw_school_plate(sign_rect, alpha)
       if ui_state.speed_limit_vision:
         self._draw_vision_status(sign_rect)
 
@@ -364,6 +369,27 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
     else:
       halo = rl.Rectangle(sign_rect.x - width, sign_rect.y - width, sign_rect.width + 2 * width, sign_rect.height + 2 * width)
       rl.draw_rectangle_rounded(halo, 0.35, 10, color)
+
+  def _draw_school_plate(self, sign_rect, alpha: float = 1.0):
+    """School zone plate under the sign while the camera's limit is a school zone limit: the fluorescent yellow-green
+    pentagon that is mounted above the speed limit sign (on screen the sign is at the top, so the plate goes below).
+    Below the vision status badge; the map's AHEAD box, which also goes here, is never shown with a camera limit."""
+    fill = rl.color_alpha(Colors.SCHOOL, alpha)
+    black = rl.color_alpha(Colors.BLACK, alpha)
+    w, h = sign_rect.width * 0.86, 104
+    x0, y0 = sign_rect.x + (sign_rect.width - w) / 2, sign_rect.y + sign_rect.height + 30
+    shoulder = y0 + h * 0.36
+    def pentagon(inset):
+      top = rl.Vector2(x0 + w / 2, y0 + inset * 1.4)
+      left, right = rl.Vector2(x0 + inset, shoulder + inset * 0.4), rl.Vector2(x0 + w - inset, shoulder + inset * 0.4)
+      bl, br = rl.Vector2(x0 + inset, y0 + h - inset), rl.Vector2(x0 + w - inset, y0 + h - inset)
+      return top, left, right, bl, br
+    for inset, color in ((0, black), (5, fill)):
+      top, left, right, bl, br = pentagon(inset)
+      rl.draw_triangle(top, left, right, color)  # counter-clockwise for raylib
+      rl.draw_triangle(left, bl, br, color)
+      rl.draw_triangle(left, br, right, color)
+    self._draw_text_centered(self.font_bold, "SCHOOL", 34, rl.Vector2(x0 + w / 2, y0 + h * 0.68), black)
 
   def _draw_vision_status(self, sign_rect):
     """Debug badge on the sign's bottom-left corner: is signd running, and what is it doing.
