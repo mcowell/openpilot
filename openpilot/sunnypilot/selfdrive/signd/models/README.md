@@ -36,3 +36,12 @@ School check v1 (2026-11-23): own drives (never trained on) 15/15 school sign cr
 the held limit's value (p >= 0.6) within 4 s. Replayed over the two school drives (Greenbank 50, 4a 40): the plate went on
 at each school sign and off ~500 m later.
 
+Detector v7 + classifier v12 (2026-11-23): the black NCC parkway signs (white on black, Kichi Zibi Mikan). The detector
+retrained on all labelled drives (rounds 11-14) plus hand-boxed black sign frames now finds them; the classifier adds 551
+eye-checked crops of 11 black signs (drives 36/50 trained, drive 52 held out) and three misreads as training samples (a
+no-U-turn sign and a stacked 100/60 as reject, a school zone 60 read as 40). Colour-inverted white signs as extra
+training data were tried and dropped: they added misreads of distant white signs (60 as 80). Replayed over all 63
+drives and checked by eye: no wrong limit changes (v10: none); signs shown 90% on held-out drives (v10: 86%); the 9
+black sign sightings all shown (v10: none); 17 school plates, all at real school signs. Classifier seeds still differ a
+lot (two siblings of the shipped one made 3 wrong changes each): pick by the full replay, never by validation metrics.
+
