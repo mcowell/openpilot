@@ -24,7 +24,7 @@ def window(rect) -> Window:
 
 class StubDetector:
   """The sign is in tile 0 while `visible`. Local windows find it while `local_ok`. Records each GPU run."""
-  def __init__(self, local=True, value: int | None = 50, school: float = 0.):
+  def __init__(self, local=True, value: int | None = 50, school: float | None = None):
     self.local = object() if local else None
     self.value = value
     self.school = school
@@ -55,13 +55,14 @@ class StubDetector:
     return np.zeros(1)
 
   def prepare_school(self, data, stride, uv_offset, w, h, box):
-    return np.ones(1)
+    return None if self.school is None else np.ones(1)  # None: no school model
 
   def run_classifier(self, x):
     self.runs.append('classify')
     return self.value, 0.9
 
   def run_school(self, x):
+    self.runs.append('school')
     self.school_runs += 1
     return self.school
 
@@ -102,13 +103,15 @@ class TestSignReader(OpenpilotTestCase):
     readings = [d for d in out if d]
     assert len(readings) == 6 and all(d[0].value == 50 for d in readings)
 
-  def test_school_check_in_classify_job(self):
-    # speed signs get the school check in the same job; its probability travels with the reading
+  def test_school_check_is_its_own_job(self):
+    # speed signs get the school check as the next job (classifier + check together are too long for one gap); the
+    # reading comes out of the school job, with the probability
     det = StubDetector(school=0.9)
     out = run(SignReader(det, ReaderParams(track_time=10.)), 1.)
     readings = [d[0] for d in out if d]
     assert readings and all(d.school == 0.9 for d in readings)
-    assert det.school_runs == det.runs.count('classify')
+    assert det.runs[:4] == ['tile0', 'local', 'classify', 'school']
+    assert det.school_runs == det.runs.count('classify') or det.school_runs == det.runs.count('classify') - 1
 
   def test_no_school_check_on_unreadable_or_end(self):
     for value in (None, 0):
