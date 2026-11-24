@@ -214,7 +214,6 @@ class Modem:
     self._ppp = PPPSession()
     self._sim_change = False
     self._apn = ""  # blank = network-provided via PCO
-    self._operator = ""  # GsmOperator: network to register on (MCC+MNC), blank = automatic
     self._roaming_allowed = True
     self.running = True
     self.S = INITIAL_STATE.copy()
@@ -251,16 +250,13 @@ class Modem:
     os.chmod(f.name, 0o644)
     os.replace(f.name, STATE_PATH)
 
-  def _at(self, cmd, timeout: float = 5, errors: list | None = None):
-    """Send AT command, return response lines. [] on error or if LPA holds port. timeout: s to wait for each line (network
-    commands like AT+COPS=1 answer only once registration is done). errors: the failure is appended to it, if given."""
+  def _at(self, cmd):
+    """Send AT command, return response lines. [] on error or if LPA holds port."""
     fd = os.open(AT_LOCK, os.O_CREAT | os.O_RDWR, 0o666)
     try:
       fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
       os.close(fd)
-      if errors is not None:
-        errors.append("port busy")
       return []
     try:
       with _serial_port(AT_PORT, 9600) as serial_fd:
@@ -270,7 +266,7 @@ class Modem:
           command = command[os.write(serial_fd, command):]
         lines = []
         while True:
-          raw = _read_line(serial_fd, timeout)
+          raw = _read_line(serial_fd, 5)
           if not raw:
             raise TimeoutError("AT timeout")
           line = raw.decode(errors="ignore").strip()
@@ -284,8 +280,6 @@ class Modem:
         return lines
     except (RuntimeError, TimeoutError, OSError) as e:
       logging.info(f"AT {cmd} failed: {e}")
-      if errors is not None:
-        errors.append(str(e))
       return []
     finally:
       fcntl.flock(fd, fcntl.LOCK_UN)
@@ -347,34 +341,10 @@ class Modem:
     # blank APN lets the carrier supply one via PCO
     self._at(f'AT+CGDCONT={DIAL_CID},"IP","{self._apn}"')
     logging.info(f"APN '{self._apn or '(network-provided)'}' written to CID {DIAL_CID}, roaming={'on' if self._roaming_allowed else 'off'}")
-    self._select_operator(identity["iccid"])
 
     self._sim_change = False  # clear since we just re-read identity with the new SIM
     self._publish_state(**identity)
     return State.SEARCHING
-
-  def _select_operator(self, iccid: str) -> None:
-    """Register on the GsmOperator network (MCC+MNC, e.g. 302720) instead of letting the modem choose. For roaming SIMs that
-    some local networks refuse: the modem otherwise tries those first and the eUICC falls back to the comma profile before
-    it finds one that accepts the SIM. Not for the comma (Webbing) profile. If that network can't be registered on, back
-    to automatic, so a missing network never leaves the device without service."""
-    self._operator = self._read_param("GsmOperator")
-    if iccid.startswith(WEBBING_ICCID_PREFIX):
-      return
-    if not self._operator:
-      # manual selection outlives a reconnect: undo it when the setting was cleared
-      if (self._atv("AT+COPS?", "+COPS:") or "").split(",")[0].strip() in ("1", "4"):
-        logging.info("operator selection cleared, back to automatic")
-        self._at("AT+COPS=0", timeout=60)
-      return
-    errors: list = []
-    t = time.monotonic()
-    self._at(f'AT+COPS=1,2,"{self._operator}"', timeout=180, errors=errors)  # answers once registered (~10-30 s)
-    if errors:
-      logging.warning(f"operator {self._operator} not registered ({errors[0]}), back to automatic")
-      self._at("AT+COPS=0")
-    else:
-      logging.info(f"registered on operator {self._operator} in {time.monotonic() - t:.0f} s")
 
   def _read_identity(self):
     def first_line(cmd):
@@ -451,10 +421,6 @@ class Modem:
     return State.CONNECTED
 
   def _params_changed(self) -> bool:
-    new_operator = self._read_param("GsmOperator")
-    if new_operator != self._operator:
-      logging.info(f"GsmOperator changed: '{self._operator}' -> '{new_operator}'")
-      return True
     new_apn = self._read_param("GsmApn")
     if new_apn != self._apn:
       logging.info(f"GsmApn changed: '{self._apn}' -> '{new_apn}'")

@@ -50,7 +50,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"GithubUsername", {PERSISTENT | BACKUP, STRING}},
     {"GitRemote", {PERSISTENT, STRING}},
     {"GsmApn", {PERSISTENT | BACKUP, STRING}},
-    {"GsmOperator", {PERSISTENT | BACKUP, STRING}},  // MCC+MNC to register on (e.g. 302720), blank = automatic
     {"GsmMetered", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"GsmRoaming", {PERSISTENT | BACKUP, BOOL}},
     {"HardwareSerial", {PERSISTENT, STRING}},
