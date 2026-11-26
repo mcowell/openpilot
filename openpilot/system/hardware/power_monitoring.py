@@ -13,13 +13,6 @@ CAR_BATTERY_CAPACITY_uWh = 30e6
 CAR_CHARGING_RATE_W = 45
 
 VBATT_PAUSE_CHARGING = 11.8           # Lower limit on the LPF car battery voltage
-
-# With the ignition off, only a battery charger or maintainer holds the car battery this high for long (a rested battery
-# sits at ~12.6-13 V, surface charge after a drive fades within minutes). While it does, the battery is charging, not
-# draining: refill the capacity budget instead of spending it, so a car on a charger doesn't shut the device down.
-VBATT_EXTERNAL_CHARGING = 13.3        # LPF car battery voltage, V
-EXTERNAL_CHARGING_MIN_TIME_S = 600    # sustained, after the ignition was last on
-EXTERNAL_CHARGING_RATE_W = 10         # conservative: maintainers supply ~10-50 W
 MAX_TIME_OFFROAD_S = 30*3600
 MIN_ON_TIME_S = 3600
 DELAY_SHUTDOWN_TIME_S = 300 # Wait at least DELAY_SHUTDOWN_TIME_S seconds after offroad_time to shutdown.
@@ -35,7 +28,6 @@ class PowerMonitoring:
     self.car_voltage_mV = 12e3                  # Low-passed version of peripheralState voltage
     self.car_voltage_instant_mV = 12e3          # Last value of peripheralState voltage
     self.integration_lock = threading.Lock()
-    self.external_charging_since: float | None = None  # when the LPF voltage last rose above VBATT_EXTERNAL_CHARGING
 
     car_battery_capacity_uWh = self.params.get("CarBatteryCapacity") or 0
 
@@ -75,7 +67,6 @@ class PowerMonitoring:
 
       if ignition:
         # If there is ignition, we integrate the charging rate of the car
-        self.external_charging_since = None  # alternator voltage, then surface charge: not an external charger
         with self.integration_lock:
           self.power_used_uWh = 0
           integration_time_h = (now - self.last_measurement_time) / 3600
@@ -88,20 +79,11 @@ class PowerMonitoring:
         current_power = HARDWARE.get_current_power_draw()
 
         # Do the integration
-        self._perform_integration(now, current_power, self._external_charging(now))
+        self._perform_integration(now, current_power)
     except Exception:
       cloudlog.exception("Power monitoring calculation failed")
 
-  def _external_charging(self, now: float) -> bool:
-    """Ignition off and a charger holding the car battery voltage up for EXTERNAL_CHARGING_MIN_TIME_S"""
-    if self.car_voltage_mV < VBATT_EXTERNAL_CHARGING * 1e3:
-      self.external_charging_since = None
-      return False
-    if self.external_charging_since is None:
-      self.external_charging_since = now
-    return now - self.external_charging_since >= EXTERNAL_CHARGING_MIN_TIME_S
-
-  def _perform_integration(self, t: float, current_power: float, external_charging: bool = False) -> None:
+  def _perform_integration(self, t: float, current_power: float) -> None:
     with self.integration_lock:
       try:
         if self.last_measurement_time:
@@ -110,10 +92,7 @@ class PowerMonitoring:
           if power_used < 0:
             raise ValueError(f"Negative power used! Integration time: {integration_time_h} h Current Power: {power_used} uWh")
           self.power_used_uWh += power_used
-          if external_charging:
-            self.car_battery_capacity_uWh += EXTERNAL_CHARGING_RATE_W * 1e6 * integration_time_h
-          else:
-            self.car_battery_capacity_uWh -= power_used
+          self.car_battery_capacity_uWh -= power_used
           self.last_measurement_time = t
       except Exception:
         cloudlog.exception("Integration failed")

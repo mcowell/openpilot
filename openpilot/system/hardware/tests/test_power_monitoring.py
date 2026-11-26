@@ -2,8 +2,7 @@ from openpilot.common.parameterized import parameterized
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.common.params import Params
 from openpilot.system.hardware.power_monitoring import PowerMonitoring, CAR_BATTERY_CAPACITY_uWh, \
-  CAR_CHARGING_RATE_W, VBATT_PAUSE_CHARGING, DELAY_SHUTDOWN_TIME_S, MAX_TIME_OFFROAD_S, VBATT_EXTERNAL_CHARGING, \
-  EXTERNAL_CHARGING_MIN_TIME_S, EXTERNAL_CHARGING_RATE_W
+  CAR_CHARGING_RATE_W, VBATT_PAUSE_CHARGING, DELAY_SHUTDOWN_TIME_S, MAX_TIME_OFFROAD_S
 
 # Create fake time
 ssb = 0.
@@ -100,47 +99,6 @@ class TestPowerMonitoring(OpenpilotTestCase):
       pm.calculate(GOOD_VOLTAGE, False)
     estimated_capacity = 0 - ((1/3600) * POWER_DRAW * 1e6)
     assert abs(pm.get_car_battery_capacity() - estimated_capacity) < 10
-
-  # Battery charger / maintainer on the car battery with the ignition off: the capacity budget refills
-  def test_external_charger_refills_capacity(self, mocker):
-    pm_patch(mocker, "HARDWARE.get_current_power_draw", 4)
-    pm = PowerMonitoring()
-    pm.car_battery_capacity_uWh = CAR_BATTERY_CAPACITY_uWh / 10
-    charger_v = 14.3e3
-    for _ in range(EXTERNAL_CHARGING_MIN_TIME_S + 3600):
-      pm.calculate(charger_v, False)
-    assert pm.external_charging_since is not None
-    # less than an hour of refill: the LPF voltage takes a while to rise, then it must stay up EXTERNAL_CHARGING_MIN_TIME_S
-    assert CAR_BATTERY_CAPACITY_uWh / 10 + 0.5 * EXTERNAL_CHARGING_RATE_W * 1e6 < pm.get_car_battery_capacity() < \
-           CAR_BATTERY_CAPACITY_uWh / 10 + EXTERNAL_CHARGING_RATE_W * 1e6
-    assert pm.get_power_used() > 0  # the device's own draw is still reported
-    assert not pm.should_shutdown(False, True, ssb - 2 * DELAY_SHUTDOWN_TIME_S, True)
-
-  # A short time above the threshold (surface charge after a drive) doesn't count as charging
-  def test_brief_high_voltage_drains(self, mocker):
-    pm_patch(mocker, "HARDWARE.get_current_power_draw", 4)
-    pm = PowerMonitoring()
-    pm.car_battery_capacity_uWh = CAR_BATTERY_CAPACITY_uWh / 2
-    pm.car_voltage_mV = VBATT_EXTERNAL_CHARGING * 1e3 + 300
-    for _ in range(EXTERNAL_CHARGING_MIN_TIME_S - 10):
-      pm.calculate(VBATT_EXTERNAL_CHARGING * 1e3 + 300, False)
-    assert pm.get_car_battery_capacity() < CAR_BATTERY_CAPACITY_uWh / 2
-    # and dropping below the threshold restarts the wait
-    for _ in range(200):
-      pm.calculate(12.5e3, False)
-    assert pm.external_charging_since is None
-
-  # High voltage while the ignition is on is the alternator: after ignition off, the wait starts over
-  def test_ignition_resets_external_charging(self, mocker):
-    pm_patch(mocker, "HARDWARE.get_current_power_draw", 4)
-    pm = PowerMonitoring()
-    pm.car_voltage_mV = 14.3e3
-    for _ in range(2 * EXTERNAL_CHARGING_MIN_TIME_S):
-      pm.calculate(14.3e3, True)
-    before = pm.get_car_battery_capacity()
-    for _ in range(EXTERNAL_CHARGING_MIN_TIME_S - 10):
-      pm.calculate(14.3e3, False)
-    assert pm.get_car_battery_capacity() < before
 
   # Test to check policy of stopping charging after MAX_TIME_OFFROAD_S
   def test_max_time_offroad(self, mocker):
