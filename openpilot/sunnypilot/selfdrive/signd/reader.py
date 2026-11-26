@@ -11,6 +11,9 @@ finishes a frame, so signd never holds the GPU when modeld needs it:
   classify: the classifier on a crop cut (on the CPU) from the frame where a sign was found
   school:   on a sign read as a speed, the school zone check on the area above it (its own job: classifier + school
             check together are ~23 ms on a 3X, too long for one gap). The reading is reported after it.
+  worker:   the work zone check (is it a road work sign?), on signs the detector boxed as road work signs (instead of the
+            classifier), and on signs the classifier rejected. A sign that passes it isn't counted as a miss, so it keeps
+            being read while in view.
 Signs are often readable for only ~1 s, so a found sign is read several times a second for a couple of seconds.
 prepare() picks the next job and does its CPU work (while the GPU is busy with modeld); run() does the GPU part.
 Shared by signd and tools/sign_eval.py so offline results match the car.
@@ -21,7 +24,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from openpilot.sunnypilot.selfdrive.signd.detector import Candidate, Window, best_overlap
+from openpilot.sunnypilot.selfdrive.signd.detector import WORK_CLASS, Candidate, Window, best_overlap
 from openpilot.sunnypilot.selfdrive.signd.guard import GuardLevel
 from openpilot.sunnypilot.selfdrive.signd.sign_filter import Detection
 
@@ -40,6 +43,8 @@ class Detector(Protocol):
   def prepare_school(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> np.ndarray | None: ...
   def run_classifier(self, x: np.ndarray) -> tuple[int | None, float]: ...
   def run_school(self, x: np.ndarray | None) -> float: ...
+  def prepare_worker(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> np.ndarray | None: ...
+  def run_worker(self, x: np.ndarray | None) -> float: ...
   def candidate(self, box, score: float, value: int | None, prob: float, school: float = 0.) -> Candidate: ...
   def to_detection(self, c: Candidate, w: int, h: int) -> Detection | None: ...
 
@@ -56,6 +61,7 @@ class ReaderParams:
   max_misses: int = 2  # consecutive reads that lose the sign, or can't read it, before the track is dropped
   match_iou: float = 0.1  # a tile detection overlapping a track this much is the same sign
   max_pending: int = 3  # crops waiting for the classifier; the oldest are dropped beyond this
+  worker_keep_prob: float = 0.5  # a rejected sign whose work zone check is at least this isn't counted as a miss
   ignore_time: float = 3.  # s a dropped track's area is ignored by tiles, so e.g. a licence plate isn't re-tracked at once
   fallback_scan_hz: float = 2.  # without a local detector: fixed full scans (one long job) at this rate instead
 
@@ -68,6 +74,7 @@ class Track:
   vel: np.ndarray = field(default_factory=lambda: np.zeros(3))  # centre x, centre y (px/s), log height (1/s)
   misses: int = 0
   last_read: float = -math.inf
+  work: bool = False  # the detector's latest box of it was a road work sign
 
   def predict(self, t: float) -> np.ndarray:
     dt = t - self.t
@@ -86,6 +93,11 @@ class Track:
     self.box, self.t = box.astype(float), t
 
 
+def is_work(row: np.ndarray) -> bool:
+  """A detector row ([x0, y0, x1, y1, score, class]) boxed as a road work sign"""
+  return len(row) > 5 and int(row[5]) == WORK_CLASS
+
+
 def iou(a, b) -> float:
   ix = max(0., min(a[2], b[2]) - max(a[0], b[0]))
   iy = max(0., min(a[3], b[3]) - max(a[1], b[1]))
@@ -95,7 +107,7 @@ def iou(a, b) -> float:
 
 @dataclass
 class Job:
-  kind: str  # 'tile', 'local', 'classify', 'school' or 'scan'
+  kind: str  # 'tile', 'local', 'classify', 'school', 'worker' or 'scan'
   t: float
   frame: tuple[np.ndarray, int, int, int, int]  # data, stride, uv_offset, w, h: crops are cut from it after run()
   window: Window | None = None
@@ -103,6 +115,7 @@ class Job:
   score: float = 0.
   crop: np.ndarray | None = None
   school_crop: np.ndarray | None = None  # area above the sign, for the school check (classify and school jobs)
+  worker_crop: np.ndarray | None = None  # the sign, for the work zone check (classify and worker jobs)
   track: Track | None = None
   candidate: Candidate | None = None  # school: the reading waiting for its school check
 
@@ -117,7 +130,13 @@ class SignReader:
     self.last_scan = -math.inf
     self._slot = 0
     self._tile = 0
-    self.runs = {'scan': 0, 'tile': 0, 'local': 0, 'classify': 0, 'school': 0}
+    self.runs = {'scan': 0, 'tile': 0, 'local': 0, 'classify': 0, 'school': 0, 'worker': 0}
+    self.worker_reads: list[tuple[float, float]] = []  # (t, probability) of work zone checks; the caller takes them
+
+  def take_worker_reads(self) -> list[tuple[float, float]]:
+    """Work zone check results since the last call: (t, probability)"""
+    out, self.worker_reads = self.worker_reads, []
+    return out
 
   def update(self, t: float, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int,
              level: GuardLevel = GuardLevel.normal) -> list[Detection] | None:
@@ -189,8 +208,21 @@ class SignReader:
         # a speed sign: the school check runs next, as its own job, and reports the reading
         self.pending.insert(0, Job('school', job.t, job.frame, school_crop=job.school_crop, candidate=c))
         return []
+      if c.value is None and job.worker_crop is not None:
+        # not a speed sign: is it a road work sign? (its own job)
+        self.pending.insert(0, Job('worker', job.t, job.frame, worker_crop=job.worker_crop, track=job.track))
       d = self.detector.to_detection(c, w, h)
       return [] if d is None else [d]
+
+    if job.kind == 'worker':
+      p = self.detector.run_worker(job.worker_crop)
+      self.worker_reads.append((job.t, p))
+      if job.track is not None:
+        if p >= self.params.worker_keep_prob:
+          job.track.misses = 0  # keep reading a road work sign while it's in view: the zone needs 2 readings
+        elif job.track.work:
+          job.track.misses += 1  # (a rejected speed-class sign was already counted by its classify job)
+      return []
 
     if job.kind == 'school':
       assert job.candidate is not None
@@ -206,6 +238,7 @@ class SignReader:
         job.track.misses += 1
       else:
         job.track.update(job.t, best[:4])
+        job.track.work = is_work(best)
         self._queue(job, best[:4], float(best[4]), job.track)
       return []
 
@@ -217,16 +250,27 @@ class SignReader:
       if tr is not None and iou(tr.predict(job.t), box) >= self.params.match_iou:
         tr.update(job.t, box)
       elif len(self.tracks) < self.params.max_tracks and not any(iou(b, box) >= self.params.match_iou for b, _ in self.ignored):
-        self.tracks.append(Track(box=box.astype(float), t=job.t, start_t=job.t))
+        self.tracks.append(Track(box=box.astype(float), t=job.t, start_t=job.t, work=is_work(row)))
     return []
 
   def _queue(self, job: Job, box: np.ndarray, score: float, track: Track) -> None:
+    if track.work:
+      # a road work sign: the worker check instead of the classifier. Only the latest read of a track waits.
+      worker_crop = self.detector.prepare_worker(*job.frame, box)
+      self.pending = [j for j in self.pending if not (j.kind == 'worker' and j.track is track and j.box is not None)]
+      if worker_crop is None:
+        track.misses += 1  # too small to check yet
+      else:
+        self.pending.append(Job('worker', job.t, job.frame, box=box, worker_crop=worker_crop, track=track))
+      return
     crop = self.detector.prepare_crop(*job.frame, box)
     if crop is None:
       return
     school_crop = self.detector.prepare_school(*job.frame, box)
-    self.pending.append(Job('classify', job.t, job.frame, box=box, score=score, crop=crop, school_crop=school_crop, track=track))
-    # drop the oldest classify jobs beyond max_pending; a school job (a reading waiting for its check) is never dropped
+    worker_crop = self.detector.prepare_worker(*job.frame, box)  # cut now: the frame buffer is reused
+    self.pending.append(Job('classify', job.t, job.frame, box=box, score=score, crop=crop, school_crop=school_crop,
+                            worker_crop=worker_crop, track=track))
+    # drop the oldest classify jobs beyond max_pending; school and worker jobs (checks of a reading) are never dropped
     classify = [j for j in self.pending if j.kind == 'classify']
     for j in classify[:-self.params.max_pending]:
       self.pending.remove(j)

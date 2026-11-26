@@ -27,6 +27,7 @@ from openpilot.sunnypilot.selfdrive.signd.detector import SignDetector
 from openpilot.sunnypilot.selfdrive.signd.guard import ModelGuard
 from openpilot.sunnypilot.selfdrive.signd.reader import SignReader
 from openpilot.sunnypilot.selfdrive.signd.sign_filter import SignFilter, SignFilterState
+from openpilot.sunnypilot.selfdrive.signd.work_zone import WorkZoneFilter, WorkZoneState
 
 CAMERA = 'road'
 MAP_STALE_TIME = 5.  # s without liveMapDataSP before its road name is treated as unknown
@@ -41,7 +42,7 @@ class DebugStatus:
 
 
 def get_vision_speed_limit_packet(state: SignFilterState, is_metric: bool, frame_id: int, exec_time: float,
-                                  debug: DebugStatus | None = None) -> messaging.capnp._DynamicStructBuilder:
+                                  debug: DebugStatus | None = None, work_zone: WorkZoneState | None = None) -> messaging.capnp._DynamicStructBuilder:
   msg = messaging.new_message('liveVisionSpeedLimitSP', valid=True)
   vsl = msg.liveVisionSpeedLimitSP
   vsl.speedLimitValid = state.speed_limit > 0
@@ -52,6 +53,8 @@ def get_vision_speed_limit_packet(state: SignFilterState, is_metric: bool, frame
   vsl.timeSinceSign = state.time_since_accept
   vsl.distanceSinceSign = state.distance_since_accept
   vsl.schoolZone = state.school_zone
+  if work_zone is not None:
+    vsl.workZone = work_zone.active
   vsl.frameId = frame_id
   vsl.modelExecutionTime = exec_time
   if debug is not None:
@@ -90,6 +93,7 @@ def main():
   reader = SignReader(detector)
   guard = ModelGuard()  # backs off if the driving model drops frames
   sign_filter = SignFilter()
+  work_zone_filter = WorkZoneFilter()
   cloudlog.warning("signd: models loaded, starting")
 
   sm = messaging.SubMaster(['carState', 'deviceMotion', 'modelV2', 'liveMapDataSP'])
@@ -136,10 +140,12 @@ def main():
     road = map_data.roadName if map_fresh else ''
     map_limit = map_data.speedLimit * (CV.MS_TO_KPH if is_metric else CV.MS_TO_MPH) if map_fresh and map_data.speedLimitValid else 0.
     state = sign_filter.update(now, detections or [], sm['carState'].vEgo, yaw_rate, road, map_limit)
+    work_zone = work_zone_filter.update(now, reader.take_worker_reads(), sm['carState'].vEgo)
     if now - last_publish >= 1. / SIGND_RATE_HZ:
       last_publish = now
       debug = DebugStatus(int(level), bool(reader.tracks), last_read[0] if last_read else 0, now - last_read[1] if last_read else -1.)
-      pm.send('liveVisionSpeedLimitSP', get_vision_speed_limit_packet(state, is_metric, vipc_client.frame_id, exec_time, debug))
+      pm.send('liveVisionSpeedLimitSP', get_vision_speed_limit_packet(state, is_metric, vipc_client.frame_id, exec_time, debug,
+                                                                           work_zone))
 
 
 if __name__ == "__main__":

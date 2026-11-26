@@ -50,6 +50,7 @@ class Colors:
   CAM_TRACKING = rl.Color(40, 170, 255, 255)
   CAM_BACKED_OFF = rl.Color(255, 165, 0, 255)
   SCHOOL = rl.Color(198, 230, 0, 255)  # fluorescent yellow-green, as school zone signs
+  WORK_ZONE = rl.Color(255, 122, 0, 255)  # construction orange, as Ontario temporary condition (TC) signs
 
 
 SIGN_STYLE_CANADA = 1  # SpeedLimitSignStyle param: 0 auto, 1 Canadian sign for km/h
@@ -124,6 +125,7 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
     self.speed_limit_assist_state = AssistState.disabled
     self._camera_limit_shown: tuple[float, float] | None = None  # (limit, time) the camera's number went on the sign
     self.school_zone = False  # the shown limit is the camera's and it read a school zone pentagon on that sign
+    self.work_zone = False  # the camera saw a road work sign within the last ~2.5 km
 
     self.speed_limit_ahead = 0.0
     self.speed_limit_ahead_dist = 0.0
@@ -172,6 +174,7 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
         self._camera_limit_shown = (self.speed_limit, time.monotonic())
       self.speed_limit_assist_state = assist.state
       self.school_zone = camera and resolver.schoolZone
+      self.work_zone = resolver.workZone
 
     if sm.updated["liveMapDataSP"]:
       lmd = sm["liveMapDataSP"]
@@ -227,6 +230,8 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
         self._draw_ahead_info(sign_rect)
       if self.school_zone:
         self._draw_school_plate(sign_rect, alpha)
+      if self.work_zone:
+        self._draw_work_zone(sign_rect, alpha)
       if ui_state.speed_limit_vision:
         self._draw_vision_status(sign_rect)
 
@@ -391,6 +396,29 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
       rl.draw_triangle(left, br, right, color)
     self._draw_text_centered(self.font_bold, "SCHOOL", 34, rl.Vector2(x0 + w / 2, y0 + h * 0.68), black)
 
+  def _ahead_shown(self) -> bool:
+    return (self.speed_limit_source == SpeedLimitSource.map and self.speed_limit_ahead_valid and self.speed_limit_ahead > 0
+            and self.speed_limit_ahead != self.speed_limit)
+
+  def _draw_work_zone(self, sign_rect, alpha: float = 1.0):
+    """Work zone diamond ("WORK") under the sign (below the school plate or the map's AHEAD box when shown) while the camera has
+    seen a road work sign recently: an orange temporary condition diamond, as the signs that started it"""
+    fill = rl.color_alpha(Colors.WORK_ZONE, alpha)
+    black = rl.color_alpha(Colors.BLACK, alpha)
+    side = 160  # corner to corner
+    y0 = sign_rect.y + sign_rect.height + 30
+    if self.school_zone:
+      y0 += 104 + 16
+    elif self._ahead_shown():
+      y0 = sign_rect.y + sign_rect.height + 10 + 160 + 16
+    cx, cy = sign_rect.x + sign_rect.width / 2, y0 + side / 2
+    for half, color in ((side / 2, black), (side / 2 - 6, fill)):
+      top, bottom = rl.Vector2(cx, cy - half), rl.Vector2(cx, cy + half)
+      left, right = rl.Vector2(cx - half, cy), rl.Vector2(cx + half, cy)
+      rl.draw_triangle(top, left, right, color)  # counter-clockwise for raylib
+      rl.draw_triangle(left, bottom, right, color)
+    self._draw_text_centered(self.font_bold, "WORK", 34, rl.Vector2(cx, cy), black)  # as the cluster's WORK plate
+
   def _draw_vision_status(self, sign_rect):
     """Debug badge on the sign's bottom-left corner: is signd running, and what is it doing.
     grey: no messages (starting or not running), green: scanning, blue: following a sign, orange: backed off because
@@ -431,10 +459,7 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
       rl.draw_text_ex(self.font_bold, txt, pos, 36, 0, color)
 
   def _draw_ahead_info(self, sign_rect):
-    source_is_map = self.speed_limit_source == SpeedLimitSource.map
-    valid = self.speed_limit_ahead_valid and self.speed_limit_ahead > 0 and self.speed_limit_ahead != self.speed_limit
-
-    if not (valid and source_is_map):
+    if not self._ahead_shown():
       return
 
     rect = rl.Rectangle(sign_rect.x + (sign_rect.width - 170) / 2, sign_rect.y + sign_rect.height + 10, 170, 160)

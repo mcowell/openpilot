@@ -108,6 +108,7 @@ class ControlsExt(ModelStateBase):
     resolver = sm['longitudinalPlanSP'].speedLimit.resolver
     CC_SP.speedLimitDisplay = float(resolver.speedLimit) if resolver.speedLimitValid else 0.
     CC_SP.speedLimitSchoolZone = resolver.speedLimitValid and resolver.schoolZone
+    CC_SP.speedLimitWorkZone = resolver.workZone
 
     return CC_SP
 

@@ -209,3 +209,22 @@ class TestSchoolCrop:
     crop = school_crop(np.full((54, 64, 3), 200, np.uint8), region, box)
     assert crop.shape == (SCH_H, SCH_W, 3)
     assert crop[0, SCH_W // 2, 0] == 114 and crop[-1, SCH_W // 2, 0] == 200
+
+
+class TestWorkerCrop:
+  def test_square_with_margin(self):
+    from openpilot.sunnypilot.selfdrive.signd.detector import worker_region, worker_square
+    x0, y0, x1, y1 = worker_square((1000, 300, 1040, 350))  # 50 px tall: side 50 * 1.3 = 65
+    assert (x1 - x0, y1 - y0) == (65, 65) and x0 < 1000 and y0 < 300 and x1 > 1040 and y1 > 350
+    r = worker_region((1000, 300, 1040, 350), 1928, 1208)
+    assert r is not None and all(v % 2 == 0 for v in r) and r[0] <= x0 and r[2] >= x1
+
+  def test_crop_size_and_black_outside(self):
+    from openpilot.sunnypilot.selfdrive.signd.detector import WRK_SIZE, worker_crop, worker_region
+    box = (1900, 100, 1928, 140)  # at the right edge: the square runs off the frame
+    region = worker_region(box, 1928, 1208)
+    assert region is not None
+    rgb = np.full((region[3] - region[1], region[2] - region[0], 3), 200, np.uint8)
+    crop = worker_crop(rgb, region, box)
+    assert crop.shape == (WRK_SIZE, WRK_SIZE, 3)
+    assert crop[WRK_SIZE // 2, -1, 0] == 0 and crop[WRK_SIZE // 2, 2, 0] == 200

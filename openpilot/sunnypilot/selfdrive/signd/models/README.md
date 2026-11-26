@@ -1,11 +1,16 @@
 # signd models (proof of concept)
 
-- `sign_detector.onnx`: YOLO11n single-class speed limit sign detector at 416x416, trained with Ultralytics (AGPL-3.0).
-  Training data includes Mapillary imagery (CC BY-SA 4.0). Not upstream-clean; to be replaced by a clean detector.
+- `sign_detector.onnx`: YOLO11n sign detector at 416x416, two classes (0 speed limit sign, 1 road work sign), trained
+  with Ultralytics (AGPL-3.0). Training data includes Mapillary imagery (CC BY-SA 4.0). Not upstream-clean; to be replaced
+  by a clean detector.
 - `sign_detector_local.onnx`: the same detector weights exported at 160x160, for re-finding a tracked sign.
 - `school_classifier.onnx` (optional): school zone check on 40x60 crops of the area above a speed sign (none / school
   pentagon), trained on Mapillary school zone photos (CC BY-SA 4.0, eye-checked) shrunk to 3X sizes, and negatives above
   ordinary speed signs from Mapillary and own drives.
+- `worker_classifier.onnx` (optional): work zone check on 44x44 crops of a detected sign (other / road work sign: Ontario
+  TC-2 orange diamond with a person digging, flagger signs), trained on Mapillary roadworks photos (CC BY-SA 4.0) and
+  eye-labelled own-drive crops cut from raw camera frames as signd sees them. 44, not 40: the 3X compiler fails on 32,
+  40 and 48 inputs.
 - `sign_classifier.onnx`: value classifier on 64x96 panel+tab crops (10..130 km/h step 5, reject, end of zone), trained on synthetic signs,
   own drives and Mapillary crops (CC BY-SA 4.0).
 
@@ -45,3 +50,11 @@ drives and checked by eye: no wrong limit changes (v10: none); signs shown 90% o
 black sign sightings all shown (v10: none); 17 school plates, all at real school signs. Classifier seeds still differ a
 lot (two siblings of the shipped one made 3 wrong changes each): pick by the full replay, never by validation metrics.
 
+Detector v9 + work zone check v3 (2026-11-26): the detector gains a road work sign class (Mapillary roadworks windows and
+own-drive frames with the whole orange diamond boxed), fine-tuned from detector v7 so its speed sign features stay (v8,
+trained from scratch, lost speed signs with plates below, read a 50 as 60 and turned a red store sign into a work zone).
+Replayed over all 66 drives and checked by eye: 30 work zones (v7 with the work zone check: 11), 29 at worker signs and
+one at an orange lane shift sign in a construction zone; no wrong speed limits; vs v7 about 10 signs gained (night,
+40 AREA) and 8 lost (other 40 AREA signs, two night signs), ~15 short 40 flickers at "40 AREA ... ENDS" signs gone.
+Orange temporary limits are no longer read (never trained on). On the 3X: detector 72 ms (416) / 14 ms (160), work zone
+check 5 ms, about 1% of signd's GPU jobs.

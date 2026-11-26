@@ -13,7 +13,8 @@ Model contract (both ONNX, single input each, see README.md):
               output  either post-NMS boxes float32 [N, 6]: x1, y1, x2, y2 (input pixels), score, class
                       or raw YOLO-style predictions float32 [1, 4 + C, A]: cx, cy, w, h, then C class scores
                       (decoded and NMS'd here, since NMS ops don't run on tinygrad)
-                      class 0 = speed limit sign, anything else is ignored
+                      class 0 = speed limit sign, class 1 = road work sign (optional, for the work zone check),
+                      anything else is ignored
   classifier: input   float32 [1, 3, CLS_H, CLS_W], RGB in 0..1: see classifier_crop(), the sign panel plus the
                       area below it where tabs (AREA, BEGINS, ENDS) hang
               output  float32 [1, len(SPEED_LIMIT_VALUES) + 2] logits: the values, then reject
@@ -21,6 +22,11 @@ Model contract (both ONNX, single input each, see README.md):
   school (optional):
               input   float32 [1, 3, SCH_H, SCH_W], RGB in 0..1: see school_region(), the area just above a speed sign
               output  float32 [1, 2] logits: none, school (fluorescent yellow-green school zone pentagon on the sign)
+  worker (optional):
+              input   float32 [1, 3, WRK_SIZE, WRK_SIZE], RGB in 0..1: see worker_region(), the detected sign box, square,
+                      with a small margin (black outside the frame)
+              output  float32 [1, 2] logits: other, worker (Ontario TC-2 road work sign: orange diamond, person digging,
+                      or a flagger sign), run on signs the classifier rejected
 """
 import math
 import os
@@ -43,7 +49,12 @@ REJECT, END = len(SPEED_LIMIT_VALUES), len(SPEED_LIMIT_VALUES) + 1
 # and panel together and the pentagon is the top of the box. This region covers both. Must match the training crops.
 SCH_W, SCH_H = 40, 60
 SCH_X, SCH_TOP, SCH_BOTTOM = 0.3, 1.3, 1.1
+# work zone check crop: the sign box itself, squared, plus WRK_MARGIN box sizes each side. Must match the training crops.
+WRK_SIZE = 44  # not a multiple of 8: the 3X compiler fails on 32, 40, 48 inputs (36, 44, 56, 64 compile)
+WRK_MARGIN = 0.15
+WRK_MIN_H = 14  # px (full resolution): smaller boxes weren't trained on
 SIGN_CLASS = 0
+WORK_CLASS = 1  # road work sign (detector v8+): goes to the worker check instead of the classifier
 NMS_IOU = 0.5
 LOCAL_SIGN_PX = 30  # target panel height in the local detector's input, px
 TILE_SCALE = 0.4  # tiles see the ROI at the scale of the full scan (416 px over the 3X road ROI): what it was trained on
@@ -116,6 +127,35 @@ def school_crop(region_rgb: np.ndarray, region, box) -> np.ndarray:
   if sx1 > sx0 and sy1 > sy0:
     out[sy0 - ey0:sy1 - ey0, sx0 - ex0:sx1 - ex0] = region_rgb[sy0 - gy0:sy1 - gy0, sx0 - gx0:sx1 - gx0]
   return resize(area_downscale(out, SCH_W, SCH_H), SCH_W, SCH_H)
+
+
+def worker_square(box) -> tuple[int, int, int, int]:
+  """The worker check's square around box (x0, y0, x1, y1, frame px), as in training (may extend outside the frame)"""
+  x0, y0, x1, y1 = box
+  side = max(x1 - x0, y1 - y0) * (1 + 2 * WRK_MARGIN)
+  cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+  return int(cx - side / 2), int(cy - side / 2), int(cx + side / 2), int(cy + side / 2)
+
+
+def worker_region(box, w: int, h: int) -> tuple[int, int, int, int] | None:
+  """Frame region (even aligned, inside the frame) holding worker_square(box), None if it's off the frame"""
+  ex0, ey0, ex1, ey1 = worker_square(box)
+  cx0, cy0 = max(0, ex0) & ~1, max(0, ey0) & ~1
+  cx1, cy1 = min(w, ex1 + 2) & ~1, min(h, ey1 + 2) & ~1
+  return (cx0, cy0, cx1, cy1) if cx1 > cx0 and cy1 > cy0 else None
+
+
+def worker_crop(region_rgb: np.ndarray, region, box) -> np.ndarray:
+  """WRK_SIZE square crop for the worker check, cut from region_rgb (the frame's worker_region(), converted to RGB), with
+  the parts outside the frame black, as in training"""
+  ex0, ey0, ex1, ey1 = worker_square(box)
+  out = np.zeros((max(1, ey1 - ey0), max(1, ex1 - ex0), 3), dtype=np.uint8)
+  gx0, gy0 = region[0], region[1]
+  sx0, sy0 = max(ex0, gx0), max(ey0, gy0)
+  sx1, sy1 = min(ex1, gx0 + region_rgb.shape[1]), min(ey1, gy0 + region_rgb.shape[0])
+  if sx1 > sx0 and sy1 > sy0:
+    out[sy0 - ey0:sy1 - ey0, sx0 - ex0:sx1 - ex0] = region_rgb[sy0 - gy0:sy1 - gy0, sx0 - gx0:sx1 - gx0]
+  return resize(area_downscale(out, WRK_SIZE, WRK_SIZE), WRK_SIZE, WRK_SIZE)
 
 
 def area_downscale(img: np.ndarray, w: int, h: int) -> np.ndarray:
@@ -335,6 +375,9 @@ class SignDetector:
     # optional school zone check on speed signs
     has_school = any((models_dir / f'school_classifier{ext}').exists() for ext in ('_tinygrad.pkl', '.onnx'))
     self.school = load_model(models_dir, 'school_classifier') if has_school else None
+    # optional work zone check on signs the classifier rejects
+    has_worker = any((models_dir / f'worker_classifier{ext}').exists() for ext in ('_tinygrad.pkl', '.onnx'))
+    self.worker = load_model(models_dir, 'worker_classifier') if has_worker else None
 
   @staticmethod
   def available(models_dir: Path = MODELS_DIR, compiled: bool | None = None) -> bool:
@@ -418,15 +461,16 @@ class SignDetector:
     return Window(to_nchw(img), scale, pad_x, pad_y, wx0, wy0)
 
   def run_window(self, win: Window, w: int, h: int) -> np.ndarray:
-    """Local detector on a prepared window: [N, 5] boxes x0, y0, x1, y1 (ROI pixels) and score"""
+    """Local detector on a prepared window: [N, 6] boxes x0, y0, x1, y1 (ROI pixels), score and class (SIGN_CLASS, or
+    WORK_CLASS when there is a worker model to check it)"""
     assert self.local is not None
     rx0, ry0, rx1, ry1 = roi_pixels(self.camera, w, h)
     boxes = decode_boxes(self.local(win.x), self.min_score)
-    boxes = boxes[boxes[:, 5] == SIGN_CLASS]
+    boxes = boxes[(boxes[:, 5] == SIGN_CLASS) | ((boxes[:, 5] == WORK_CLASS) & (self.worker is not None))]
     xyxy = (boxes[:, :4] - [win.pad_x, win.pad_y, win.pad_x, win.pad_y]) / win.scale + [win.x0, win.y0, win.x0, win.y0]
     xyxy = np.clip(xyxy, 0, [rx1 - rx0, ry1 - ry0] * 2)
     keep = not_cut_plate(xyxy, ry0, h)
-    return np.concatenate([xyxy, boxes[:, 4:5]], axis=1)[keep]
+    return np.concatenate([xyxy, boxes[:, 4:6]], axis=1)[keep]
 
   def prepare_crop(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> np.ndarray | None:
     """Classifier input for box (ROI pixels), at full resolution, converting only the crop's region (clipped to the ROI,
@@ -458,6 +502,23 @@ class SignDetector:
     if x is None or self.school is None:
       return 0.
     return float(softmax(self.school(x))[0, 1])
+
+  def prepare_worker(self, data: np.ndarray, stride: int, uv_offset: int, w: int, h: int, box) -> np.ndarray | None:
+    """Worker check input for box (ROI pixels), None without the worker model or for a box too small to check"""
+    if self.worker is None or box[3] - box[1] < WRK_MIN_H:
+      return None
+    rx0, ry0, _, _ = roi_pixels(self.camera, w, h)
+    fbox = (box[0] + rx0, box[1] + ry0, box[2] + rx0, box[3] + ry0)
+    region = worker_region(fbox, w, h)
+    if region is None:
+      return None
+    return to_nchw(worker_crop(nv12_to_rgb(data, stride, uv_offset, region), region, fbox))
+
+  def run_worker(self, x: np.ndarray | None) -> float:
+    """Probability of a road work (worker / flagger) sign, 0 when x is None"""
+    if x is None or self.worker is None:
+      return 0.
+    return float(softmax(self.worker(x))[0, 1])
 
   def run_classifier(self, x: np.ndarray) -> tuple[int | None, float]:
     """value (speed, 0 for end of zone, None for reject) and its probability"""

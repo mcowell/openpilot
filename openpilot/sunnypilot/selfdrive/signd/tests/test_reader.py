@@ -24,10 +24,12 @@ def window(rect) -> Window:
 
 class StubDetector:
   """The sign is in tile 0 while `visible`. Local windows find it while `local_ok`. Records each GPU run."""
-  def __init__(self, local=True, value: int | None = 50, school: float | None = None):
+  def __init__(self, local=True, value: int | None = 50, school: float | None = None, worker: float | None = None):
     self.local = object() if local else None
     self.value = value
     self.school = school
+    self.worker = worker
+    self.work_box = False  # the detector boxes it as a road work sign (class 1)
     self.school_runs = 0  # part of a classify job, so not in runs
     self.visible = True
     self.local_ok = True
@@ -49,13 +51,20 @@ class StubDetector:
     is_local = win.x0 == -1
     self.runs.append('local' if is_local else f'tile{TILES.index((win.x0, win.y0, win.x0 + 200, win.y0 + 200))}')
     found = (is_local and self.local_ok) or (not is_local and self.visible and (win.x0, win.y0) == (0, 0))
-    return np.array([[*SIGN, 0.9]]) if found else np.zeros((0, 5))
+    return np.array([[*SIGN, 0.9, float(self.work_box)]]) if found else np.zeros((0, 6))
 
   def prepare_crop(self, data, stride, uv_offset, w, h, box):
     return np.zeros(1)
 
   def prepare_school(self, data, stride, uv_offset, w, h, box):
     return None if self.school is None else np.ones(1)  # None: no school model
+
+  def prepare_worker(self, data, stride, uv_offset, w, h, box):
+    return None if self.worker is None else np.ones(1)  # None: no worker model
+
+  def run_worker(self, x):
+    self.runs.append('worker')
+    return self.worker
 
   def run_classifier(self, x):
     self.runs.append('classify')
@@ -119,6 +128,41 @@ class TestSignReader(OpenpilotTestCase):
       out = run(SignReader(det, ReaderParams(track_time=10.)), 1.)
       assert det.school_runs == 0
       assert all(d.school == 0. for r in out if r for d in r)
+
+  def test_worker_check_on_rejected_signs_only(self):
+    det = StubDetector(value=None, worker=0.1)
+    reader = SignReader(det, ReaderParams(track_time=10.))
+    run(reader, 1.)
+    assert det.runs[:4] == ['tile0', 'local', 'classify', 'worker']  # its own job, right after the classify job
+    reads = reader.take_worker_reads()
+    assert len(reads) == det.runs.count('worker') and all(p == 0.1 for _, p in reads)
+    assert reader.take_worker_reads() == []
+    for value in (50, 0):  # speed and end of zone signs aren't checked
+      det = StubDetector(value=value, worker=0.9)
+      run(SignReader(det, ReaderParams(track_time=10.)), 1.)
+      assert 'worker' not in det.runs
+
+  def test_road_work_sign_keeps_being_read(self):
+    # a rejected sign is dropped after max_misses, but a road work sign is kept so the zone gets its 2 readings
+    for worker, many in ((0.9, True), (0.1, False)):
+      det = StubDetector(value=None, worker=worker)
+      run(SignReader(det, ReaderParams(track_time=2.)), 2.)
+      assert (det.runs.count('worker') > 5) == many, (worker, det.runs.count('worker'))
+
+  def test_road_work_box_goes_to_the_worker_check(self):
+    det = StubDetector(value=50, worker=0.9)
+    det.work_box = True
+    reader = SignReader(det, ReaderParams(track_time=10.))
+    out = run(reader, 1.)
+    assert 'classify' not in det.runs and det.runs[:3] == ['tile0', 'local', 'worker']
+    assert not any(out[i] for i in range(len(out)) if out[i])  # no speed readings from it
+    assert len(reader.take_worker_reads()) >= 5  # read on while in view: it passes the check
+
+  def test_road_work_box_failing_the_check_is_dropped(self):
+    det = StubDetector(value=50, worker=0.1)
+    det.work_box = True
+    run(SignReader(det, ReaderParams(track_time=10.)), 2.)
+    assert det.runs.count('worker') <= 3
 
   def test_new_sign_read_twice_quickly(self):
     # a sign seen while turning can be in view for only ~0.3 s, and the filter needs two readings

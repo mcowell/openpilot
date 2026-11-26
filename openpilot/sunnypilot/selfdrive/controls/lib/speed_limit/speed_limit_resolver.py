@@ -64,6 +64,7 @@ class SpeedLimitResolver:
     self.source = SpeedLimitSource.none
     self.school_zone = False  # the resolved limit is the camera's and it is a school zone limit
     self._vision_school_zone = False
+    self.work_zone = False  # the camera saw a road work sign recently (whatever the limit's source)
     for source in ALL_SOURCES:
       self._reset_limit_sources(source)
 
@@ -127,6 +128,7 @@ class SpeedLimitResolver:
   def _get_from_vision(self, sm: messaging.SubMaster) -> None:
     self._reset_limit_sources(SpeedLimitSource.vision)
     self._vision_school_zone = False
+    self.work_zone = False
     if VisionMode(self.vision_mode) == VisionMode.off:
       return
 
@@ -138,6 +140,7 @@ class SpeedLimitResolver:
 
     self.limit_solutions[SpeedLimitSource.vision] = vision_data.speedLimit if vision_data.speedLimitValid else 0.
     self._vision_school_zone = vision_data.speedLimitValid and vision_data.schoolZone
+    self.work_zone = vision_data.workZone
     self.distance_solutions[SpeedLimitSource.vision] = 0.
 
   def _get_from_map_data(self, sm: messaging.SubMaster) -> None:
