@@ -146,11 +146,13 @@ class SignFilter:
     # no standstill rule: signs are often read while stopped beside them at an intersection. What else is in view at a
     # standstill (a licence plate ahead at a red light) passes the growth check too, so the classifier must reject it.
     new_school = False
+    new_hit = False
     for det in detections:
       if not plausible(det.value, self.is_metric, road or self._current_road):
         continue
       if det.confidence >= p.min_confidence:
         self._hits.append((t, det))
+        new_hit = True
       # a school reading only needs its value to match the limit accepted from the confident readings: it can't change
       # the limit, so a less confident read of the same sign (often the far, first sightings) still counts
       if det.value and det.school >= p.school_min_prob and det.confidence >= p.school_min_confidence:
@@ -161,7 +163,9 @@ class SignFilter:
     while self._school_hits and t - self._school_hits[0][0] > p.school_window:
       self._school_hits.popleft()
 
-    candidate = self._candidate()
+    # only on a new reading: re-accepting from readings already counted (e.g. when the map limit changes and one old
+    # reading suddenly agrees with it) would restart the turn and road tracking for a sign that may be behind the car
+    candidate = self._candidate() if new_hit else None
     if candidate is not None:
       value, confidence = candidate
       self._hits.clear()

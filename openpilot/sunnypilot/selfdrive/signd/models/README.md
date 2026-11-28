@@ -58,3 +58,10 @@ one at an orange lane shift sign in a construction zone; no wrong speed limits; 
 40 AREA) and 8 lost (other 40 AREA signs, two night signs), ~15 short 40 flickers at "40 AREA ... ENDS" signs gone.
 Orange temporary limits are no longer read (never trained on). On the 3X: detector 72 ms (416) / 14 ms (160), work zone
 check 5 ms, about 1% of signd's GPU jobs.
+
+Work zone check v5 (2026-11-27): only the person digging sign (TC-2) and flaggers count; other orange signs (lane ends,
+lane shift, merge, signal ahead, pedestrian detour) are other. Adds 1372 crops cut by signd itself in a replay (the
+exact 44x44 inputs, eye-labelled), with the orange non-worker signs as hard negatives. Held-out drives: non-worker
+orange sign crops >= 0.7 0/91 (v3/v4: 27/91), worker sign crops 306/319 (316/319). Replayed over all 68 drives: the
+three false work zones (lane ends, lane shift at night, pedestrian detour) are gone, 2 weak real zones are lost (a
+sign seen at a steep angle, a small dim sign at dusk), no speed limit changes.

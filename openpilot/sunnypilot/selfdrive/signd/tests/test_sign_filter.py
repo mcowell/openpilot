@@ -198,6 +198,27 @@ class TestSignFilter(OpenpilotTestCase):
     drive(f, 0.2, t, v_ego=6., yaw_rate=math.radians(25.), road='Southwood Drive')
     assert f.state.speed_limit == 0
 
+  def test_no_reaccept_without_a_new_reading(self):
+    # Greenbank Road -> Craig Henry Drive, 2026-11-27: stopped at the light re-reading the Greenbank 50 (map: 60). Turning
+    # left, the map's limit changed to 50 and an old reading still in the window re-accepted the 50 mid-turn, restarting
+    # the turn tracking: the 50 then stayed on Craig Henry. No new reading, no accept.
+    f = SignFilter()
+    for t in (0., 0.5, 1.0):
+      f.update(t, [Detection(50, 0.9, (0.7, 0.2, 0.03, 0.04))], 0., 0., 'Greenbank Road', 60.)
+    assert f.state.speed_limit == 50
+    t = 1.0
+    for t in (1.4, 1.8):  # two more readings while stopped, then the turn starts
+      f.update(t, [Detection(50, 0.9, (0.7, 0.2, 0.03, 0.04))], 0., 0., 'Greenbank Road', 60.)
+    accepted_at = t - f.state.time_since_accept
+    for _ in range(40):  # 2 s of turning, the map now says 50: no reading, so no re-accept
+      t += 0.05
+      f.update(t, [], 4., math.radians(30.), 'Greenbank Road', 50.)
+    assert t - f.state.time_since_accept == accepted_at
+    for _ in range(20):  # the turn continues and the name catches up: the 50 goes
+      t += 0.05
+      f.update(t, [], 6., math.radians(30.), 'Craig Henry Drive', 0.)
+    assert f.state.speed_limit == 0
+
   def test_lane_change_does_not_reset(self):
     f = SignFilter()
     run(f, approaching(110, 3))

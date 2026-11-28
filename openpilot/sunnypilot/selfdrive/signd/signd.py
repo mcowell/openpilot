@@ -140,7 +140,7 @@ def main():
     road = map_data.roadName if map_fresh else ''
     map_limit = map_data.speedLimit * (CV.MS_TO_KPH if is_metric else CV.MS_TO_MPH) if map_fresh and map_data.speedLimitValid else 0.
     state = sign_filter.update(now, detections or [], sm['carState'].vEgo, yaw_rate, road, map_limit)
-    work_zone = work_zone_filter.update(now, reader.take_worker_reads(), sm['carState'].vEgo)
+    work_zone = work_zone_filter.update(now, reader.take_worker_reads(), sm['carState'].vEgo, road, yaw_rate)
     if now - last_publish >= 1. / SIGND_RATE_HZ:
       last_publish = now
       debug = DebugStatus(int(level), bool(reader.tracks), last_read[0] if last_read else 0, now - last_read[1] if last_read else -1.)
